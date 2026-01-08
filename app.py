@@ -1,9 +1,11 @@
-import streamlit as st
 import pandas as pd
+import streamlit as st
 from datetime import date
 
-# caminho do arquivo (ajuste se necessário)
-ARQUIVO = r"C:\Users\roney.sales\OneDrive - Curinga Pneumáticos Ltda\Controle_Financeiro_Casal\gastos_casal_2.xlsx"
+ARQUIVO = "dados.xlsx"
+
+df = pd.read_excel(ARQUIVO, sheet_name="gastos")
+metas = pd.read_excel(ARQUIVO, sheet_name="metas")
 
 st.set_page_config(page_title="Controle Financeiro", layout="centered")
 
