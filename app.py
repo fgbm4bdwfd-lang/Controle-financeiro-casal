@@ -719,88 +719,40 @@ if menu == "Lançar":
             obs = st.text_input("Observação")
             salvar = st.form_submit_button("Salvar gasto")
 
-        if salvar:
-            novo = {
-                "ID": uuid.uuid4().hex,
-                "Data": data_lcto,
-                "Categoria": categoria,
-                "Subcategoria": sub,
-                "Valor": float(valor),
-                "Pagamento": pagamento,
-                "Quem": quem,
-                "Obs": obs,
-                "Origem": "",
-                "RefFixa": "",
-            }
-            df_gastos = pd.concat([df_gastos, pd.DataFrame([novo])], ignore_index=True)
-            salvar_excel(df_gastos, df_metas, df_fixas, df_reservas, df_mov_res, ARQUIVO)
-            st.cache_data.clear()
-            st.rerun()
+    if salvar:
+        origem = ""
+        if (pagamento in CARTOES) and ("pagto_fatura" in locals()) and pagto_fatura:
+            origem = "PAGTO_FATURA"
 
-        st.divider()
-        st.subheader("Últimos lançamentos")
-        show = df_gastos.copy()
-        show["Data_dt"] = pd.to_datetime(show["Data"], errors="coerce")
-        show = show.sort_values("Data_dt", ascending=False).head(30).copy()
-        show["Valor"] = show["Valor"].map(fmt_brl)
-        st.dataframe(
-            show[["Data", "Categoria", "Subcategoria", "Valor", "Pagamento", "Quem", "Obs"]],
-            use_container_width=True
-        )
+        novo = {
+            "ID": uuid.uuid4().hex,
+            "Data": data_lcto,
+            "Categoria": categoria,
+            "Subcategoria": sub,
+            "Valor": float(valor),
+            "Pagamento": pagamento,
+            "Quem": quem,
+            "Obs": obs,
+            "Origem": origem,
+            "RefFixa": "",
+        }
 
-    with tab_fixas:
-        st.subheader(f"Contas fixas de {MES_NOME[mes_sel]}/{ano_sel} (lançar uma por uma)")
-        f = fixas_ativas(df_fixas).sort_values(["Dia_Venc", "Descricao"])
-
-        if f.empty:
-            st.info("Nenhuma conta fixa ativa. Cadastre em Cadastros.")
+        # Se for parcelado (cartão), gera projeção para meses seguintes
+        if (pagamento in CARTOES) and ("parcelado" in locals()) and parcelado and (not pagto_fatura) and int(parcelas) > 1:
+            df_gastos = gerar_lancamentos_parcelados(
+                df_gastos=df_gastos,
+                base=novo,
+                parcelas=int(parcelas),
+                primeira_data=primeira_parcela,
+                dia_parcela=int(dia_parcela) if dia_parcela is not None else None,
+            )
         else:
-            ld = ultimo_dia_mes(ano_sel, mes_sel)
+            df_gastos = pd.concat([df_gastos, pd.DataFrame([novo])], ignore_index=True)
 
-            for _, row in f.iterrows():
-                id_fixa = str(row["ID_Fixa"])
-                desc = str(row["Descricao"]).strip()
-                cat = str(row["Categoria"]).strip() or "Outros"
-                valor_padrao = float(row["Valor"])
-                dia_venc = int(row["Dia_Venc"])
-                dia_venc = max(1, min(dia_venc, ld))
-                data_sug = date(ano_sel, mes_sel, dia_venc)
+        salvar_excel(df_gastos, df_metas, df_fixas, df_reservas, df_mov_res, ARQUIVO)
+        st.cache_data.clear()
+        st.rerun()
 
-                ja = ja_lancou_fixa_no_mes(df_gastos, ano_sel, mes_sel, id_fixa)
-
-                titulo = f"{cat} | Venc: dia {dia_venc} | Padrão: {fmt_brl(valor_padrao)}"
-                with st.expander(titulo, expanded=False):
-                    if ja:
-                        st.warning("Esta conta fixa já foi lançada neste mês. (Se precisar corrigir, use Gerenciar.)")
-
-                    col1, col2 = st.columns([1, 1])
-                    with col1:
-                        data_pag = st.date_input("Data pagamento", value=data_sug, key=f"dt_{id_fixa}")
-                        val_real = st.number_input("Valor real (R$)", min_value=0.0, step=1.0, value=float(valor_padrao), key=f"vl_{id_fixa}")
-                    with col2:
-                        pag = st.selectbox("Forma de pagamento", PAGAMENTOS, index=PAGAMENTOS.index(row["Pagamento"]) if row["Pagamento"] in PAGAMENTOS else 0, key=f"pg_{id_fixa}")
-                        qm = st.selectbox("Quem", PESSOAS, index=PESSOAS.index(row["Quem"]) if row["Quem"] in PESSOAS else 0, key=f"qm_{id_fixa}")
-
-                    obs = st.text_input("Observação (opcional)", value=str(row["Obs"]) if str(row["Obs"]) != "nan" else "", key=f"ob_{id_fixa}")
-
-                    btn = st.button("Lançar esta fixa", key=f"btn_{id_fixa}", disabled=bool(ja))
-                    if btn:
-                        novo = {
-                            "ID": uuid.uuid4().hex,
-                            "Data": data_pag,
-                            "Categoria": cat,
-                            "Subcategoria": desc,
-                            "Valor": float(val_real),
-                            "Pagamento": pag,
-                            "Quem": qm,
-                            "Obs": (f"Conta fixa: {desc}" + (f" | {obs}" if obs else "")).strip(),
-                            "Origem": "FIXA",
-                            "RefFixa": id_fixa,
-                        }
-                        df_gastos = pd.concat([df_gastos, pd.DataFrame([novo])], ignore_index=True)
-                        salvar_excel(df_gastos, df_metas, df_fixas, df_reservas, df_mov_res, ARQUIVO)
-                        st.cache_data.clear()
-                        st.rerun()
 
 # -----------------------------
 # RESUMO
@@ -1362,6 +1314,7 @@ else:
         df_gastos, df_metas, df_fixas, df_reservas, df_mov_res = restore_from_upload(up)
         st.success("Backup restaurado.")
         st.rerun()
+
 
 
 
