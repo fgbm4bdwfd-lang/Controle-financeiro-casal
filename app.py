@@ -684,46 +684,24 @@ if menu == "Lançar":
 
     tab_var, tab_fixas = st.tabs(["Gasto variável", "Contas fixas do mês"])
 
-    with tab_var:
-        st.subheader("Novo gasto (variável)")
+    # ===== BLOCO A - FIX FORM (START) =====
+with tab_var:
+    st.subheader("Novo gasto (variável)")
 
-        with st.form("novo_gasto"):
-            data_lcto = st.date_input("Data", date.today())
-            categoria = st.selectbox("Categoria", cats_lanc)
-            sub = st.text_input("Subcategoria (opcional)")
-            valor = st.number_input("Valor (R$)", min_value=0.0, step=1.0)
-            quem = st.selectbox("Quem pagou", PESSOAS)
-            pagamento = st.selectbox("Forma de pagamento", PAGAMENTOS)
-                    # --- Cartões / anti-duplicidade e parcelamento
-        is_cartao = (pagamento in CARTOES)
+    with st.form("novo_gasto"):
+        data_lcto = st.date_input("Data", date.today())
+        categoria = st.selectbox("Categoria", cats_lanc)
+        sub = st.text_input("Subcategoria (opcional)")
+        valor = st.number_input("Valor (R$)", min_value=0.0, step=1.0)
+        quem = st.selectbox("Quem pagou", PESSOAS)
+        pagamento = st.selectbox("Forma de pagamento", PAGAMENTOS)
+        obs = st.text_input("Observação")
 
-        pagto_fatura = False
-        if is_cartao:
-            pagto_fatura = st.checkbox(
-                "Este lançamento é PAGAMENTO DA FATURA do cartão? (não entra no gasto do mês)",
-                value=False
-            )
+        # IMPORTANTE: o submit PRECISA estar dentro do form
+        salvar = st.form_submit_button("Salvar gasto")
 
-        parcelado = False
-        parcelas = 1
-        primeira_parcela = data_lcto
-        dia_parcela = None
-
-        if is_cartao and (not pagto_fatura):
-            parcelado = st.checkbox("Compra parcelada?", value=False)
-
-            if parcelado:
-                parcelas = st.number_input("Parcelas (x)", min_value=2, max_value=36, step=1, value=2)
-                primeira_parcela = st.date_input("Data da 1ª parcela", value=data_lcto)
-                dia_parcela = st.number_input("Dia das parcelas (não usar 1)", min_value=1, max_value=31, step=1, value=int(primeira_parcela.day))
-            obs = st.text_input("Observação")
-            salvar = st.form_submit_button("Salvar gasto")
-
+    # IMPORTANTE: o if salvar PRECISA estar fora do form
     if salvar:
-        origem = ""
-        if (pagamento in CARTOES) and ("pagto_fatura" in locals()) and pagto_fatura:
-            origem = "PAGTO_FATURA"
-
         novo = {
             "ID": uuid.uuid4().hex,
             "Data": data_lcto,
@@ -733,26 +711,25 @@ if menu == "Lançar":
             "Pagamento": pagamento,
             "Quem": quem,
             "Obs": obs,
-            "Origem": origem,
+            "Origem": "",
             "RefFixa": "",
         }
-
-        # Se for parcelado (cartão), gera projeção para meses seguintes
-        if (pagamento in CARTOES) and ("parcelado" in locals()) and parcelado and (not pagto_fatura) and int(parcelas) > 1:
-            df_gastos = gerar_lancamentos_parcelados(
-                df_gastos=df_gastos,
-                base=novo,
-                parcelas=int(parcelas),
-                primeira_data=primeira_parcela,
-                dia_parcela=int(dia_parcela) if dia_parcela is not None else None,
-            )
-        else:
-            df_gastos = pd.concat([df_gastos, pd.DataFrame([novo])], ignore_index=True)
-
+        df_gastos = pd.concat([df_gastos, pd.DataFrame([novo])], ignore_index=True)
         salvar_excel(df_gastos, df_metas, df_fixas, df_reservas, df_mov_res, ARQUIVO)
         st.cache_data.clear()
         st.rerun()
 
+    st.divider()
+    st.subheader("Últimos lançamentos")
+    show = df_gastos.copy()
+    show["Data_dt"] = pd.to_datetime(show["Data"], errors="coerce")
+    show = show.sort_values("Data_dt", ascending=False).head(30).copy()
+    show["Valor"] = show["Valor"].map(fmt_brl)
+    st.dataframe(
+        show[["Data", "Categoria", "Subcategoria", "Valor", "Pagamento", "Quem", "Obs"]],
+        use_container_width=True
+    )
+# ===== BLOCO A - FIX FORM (END) =====
 
 # -----------------------------
 # RESUMO
@@ -1322,6 +1299,7 @@ else:
         df_gastos, df_metas, df_fixas, df_reservas, df_mov_res = restore_from_upload(up)
         st.success("Backup restaurado.")
         st.rerun()
+
 
 
 
