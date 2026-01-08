@@ -654,7 +654,7 @@ elif menu == "Metas":
     st.divider()
     st.subheader("Meta Geral (mês)")
 
-    if meta_geral > 0:
+    if meta_geral > 7.000:
         perc_geral = (total_previsto / meta_geral) * 100.0
         falta_geral = max(meta_geral - total_previsto, 0.0)
         excedeu_geral = max(total_previsto - meta_geral, 0.0)
@@ -809,3 +809,4 @@ else:
             st.rerun()
         except Exception as e:
             st.error(f"Falha ao restaurar backup: {e}")
+
