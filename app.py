@@ -420,6 +420,79 @@ def filtro_periodo_gastos(df: pd.DataFrame, ano: int, mes: int) -> pd.DataFrame:
 
 def ultimo_dia_mes(ano: int, mes: int) -> int:
     return calendar.monthrange(ano, mes)[1]
+    
+def add_meses(d: date, meses: int) -> date:
+    """Soma 'meses' meses numa date, preservando o dia quando possível."""
+    ano = d.year + (d.month - 1 + meses) // 12
+    mes = (d.month - 1 + meses) % 12 + 1
+    dia = min(d.day, ultimo_dia_mes(ano, mes))
+    return date(ano, mes, dia)
+
+def repartir_valor_em_parcelas(valor_total: float, n: int) -> list[float]:
+    """
+    Divide valor_total em n parcelas com arredondamento em centavos.
+    A última parcela recebe o ajuste para fechar exatamente o total.
+    """
+    valor_total = float(valor_total)
+    n = int(max(1, n))
+    base = round(valor_total / n, 2)
+    parcelas = [base] * n
+    ajuste = round(valor_total - round(base * n, 2), 2)
+    parcelas[-1] = round(parcelas[-1] + ajuste, 2)
+    return parcelas
+
+def gerar_lancamentos_parcelados(
+    df_gastos: pd.DataFrame,
+    base: dict,
+    parcelas: int,
+    primeira_data: date,
+    dia_parcela: int | None = None,
+):
+    """
+    Cria N lançamentos (projeção) mês a mês.
+    Regra do 'sem dia 1º':
+      - se dia_parcela for 1, vira 2
+      - se ultrapassar último dia do mês, ajusta para o último dia
+    """
+    n = int(parcelas)
+    if n <= 1:
+        return df_gastos
+
+    # dia padrão: usa o dia da primeira_data, com regra de "não dia 1"
+    if dia_parcela is None:
+        dia_parcela = int(primeira_data.day)
+    dia_parcela = max(1, min(int(dia_parcela), 31))
+    if dia_parcela == 1:
+        dia_parcela = 2
+
+    # ID de grupo (para reconhecer que é a mesma compra parcelada)
+    grupo = uuid.uuid4().hex[:10]
+
+    valores = repartir_valor_em_parcelas(float(base["Valor"]), n)
+
+    novos = []
+    for i in range(n):
+        dt = add_meses(primeira_data, i)
+        # aplica dia fixo escolhido
+        dt = date(dt.year, dt.month, min(dia_parcela, ultimo_dia_mes(dt.year, dt.month)))
+
+        sub = str(base.get("Subcategoria", "")).strip()
+        sufixo = f" (Parcela {i+1}/{n})"
+        obs0 = str(base.get("Obs", "")).strip()
+
+        novo = dict(base)
+        novo["ID"] = uuid.uuid4().hex
+        novo["Data"] = dt
+        novo["Valor"] = float(valores[i])
+        novo["Origem"] = "PARCELADO"
+        novo["Obs"] = (obs0 + (f" | GRUPO={grupo}" if obs0 else f"GRUPO={grupo}")).strip()
+        novo["Subcategoria"] = (sub + sufixo).strip() if sub else sufixo.strip()
+
+        novos.append(novo)
+
+    df_gastos = pd.concat([df_gastos, pd.DataFrame(novos)], ignore_index=True)
+    df_gastos, _ = _ensure_gastos_schema(df_gastos)
+    return df_gastos
 
 def get_meta_geral(df_metas: pd.DataFrame) -> float:
     s = df_metas[df_metas["Categoria"].astype(str).str.strip().str.lower() == "geral"]["Meta"]
@@ -1267,4 +1340,5 @@ else:
         df_gastos, df_metas, df_fixas, df_reservas, df_mov_res = restore_from_upload(up)
         st.success("Backup restaurado.")
         st.rerun()
+
 
