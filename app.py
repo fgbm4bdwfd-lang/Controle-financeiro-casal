@@ -5,9 +5,9 @@ import pandas as pd
 import streamlit as st
 from datetime import date
 
-# ------------------------------------------------------------
+# -----------------------------
 # CONFIG
-# ------------------------------------------------------------
+# -----------------------------
 st.set_page_config(page_title="Controle Financeiro", layout="centered")
 
 ARQUIVO = "dados.xlsx"
@@ -22,96 +22,97 @@ MESES = [
 ]
 MES_NOME = {n: nome for n, nome in MESES}
 
-# ------------------------------------------------------------
-# FUNÇÕES AUXILIARES
-# ------------------------------------------------------------
+GASTOS_COLS = ["ID", "Data", "Categoria", "Subcategoria", "Valor", "Pagamento", "Quem", "Obs"]
+METAS_COLS = ["Categoria", "Meta"]
+
+# -----------------------------
+# FUNÇÕES
+# -----------------------------
 def _normalizar_colunas(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
-def _to_datetime_series(s: pd.Series) -> pd.Series:
-    return pd.to_datetime(s, errors="coerce")
-
-def _ensure_schema(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Garante colunas, tipos e cria ID se não existir.
-    """
+def _ensure_gastos_schema(df: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
+    changed = False
     df = _normalizar_colunas(df)
 
-    # Colunas esperadas
-    cols = ["ID", "Data", "Categoria", "Subcategoria", "Valor", "Pagamento", "Quem", "Obs"]
-    for c in cols:
+    for c in GASTOS_COLS:
         if c not in df.columns:
             df[c] = pd.NA
+            changed = True
 
-    # ID: cria para linhas sem ID
-    def _new_id():
-        return uuid.uuid4().hex
-
+    # ID
     df["ID"] = df["ID"].astype("string")
     faltando = df["ID"].isna() | (df["ID"].str.strip() == "")
     if faltando.any():
-        df.loc[faltando, "ID"] = [_new_id() for _ in range(int(faltando.sum()))]
+        df.loc[faltando, "ID"] = [uuid.uuid4().hex for _ in range(int(faltando.sum()))]
+        changed = True
 
     # Tipos
-    df["Data"] = _to_datetime_series(df["Data"]).dt.date
+    df["Data"] = pd.to_datetime(df["Data"], errors="coerce").dt.date
     df["Valor"] = pd.to_numeric(df["Valor"], errors="coerce").fillna(0.0)
 
-    # Strings
     for c in ["Categoria", "Subcategoria", "Pagamento", "Quem", "Obs"]:
         df[c] = df[c].astype("string").fillna("").astype(str)
 
-    # Ordena colunas
-    df = df[cols].copy()
-    return df
+    return df[GASTOS_COLS].copy(), changed
 
-def salvar_dados(arquivo: str, df: pd.DataFrame, metas: pd.DataFrame):
-    """
-    Regrava as duas abas (gastos e metas) para não perder metas ao salvar.
-    """
-    df = _ensure_schema(df)
-
+def _ensure_metas_schema(metas: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
+    changed = False
     metas = _normalizar_colunas(metas)
-    if "Categoria" not in metas.columns:
-        metas["Categoria"] = ""
-    if "Meta" not in metas.columns:
-        metas["Meta"] = 0
 
-    metas = metas.copy()
-    metas["Categoria"] = metas["Categoria"].astype(str).str.strip()
+    for c in METAS_COLS:
+        if c not in metas.columns:
+            metas[c] = pd.NA
+            changed = True
+
+    metas["Categoria"] = metas["Categoria"].astype("string").fillna("").astype(str).str.strip()
     metas["Meta"] = pd.to_numeric(metas["Meta"], errors="coerce").fillna(0.0)
 
+    return metas[METAS_COLS].copy(), changed
+
+def salvar_excel(df: pd.DataFrame, metas: pd.DataFrame, arquivo: str = ARQUIVO):
+    df2, _ = _ensure_gastos_schema(df)
+    metas2, _ = _ensure_metas_schema(metas)
+
     with pd.ExcelWriter(arquivo, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name="gastos", index=False)
-        metas.to_excel(writer, sheet_name="metas", index=False)
+        df2.to_excel(writer, sheet_name="gastos", index=False)
+        metas2.to_excel(writer, sheet_name="metas", index=False)
 
-def carregar_dados(arquivo: str):
-    """
-    Cria arquivo se não existir. Garante schema e IDs.
-    """
-    if not os.path.exists(arquivo):
-        df_vazio = pd.DataFrame(columns=["ID", "Data", "Categoria", "Subcategoria", "Valor", "Pagamento", "Quem", "Obs"])
-        metas_padrao = pd.DataFrame(
-            {
-                "Categoria": ["Alimentação", "Transporte", "Moradia", "Lazer", "Outros", "Geral"],
-                "Meta": [0, 0, 0, 0, 0, 0],
-            }
-        )
-        salvar_dados(arquivo, df_vazio, metas_padrao)
+def init_arquivo_se_faltar():
+    if os.path.exists(ARQUIVO):
+        return
+    df_vazio = pd.DataFrame(columns=GASTOS_COLS)
+    metas_padrao = pd.DataFrame(
+        {"Categoria": ["Alimentação", "Transporte", "Moradia", "Lazer", "Outros", "Geral"],
+         "Meta": [0, 0, 0, 0, 0, 0]}
+    )
+    salvar_excel(df_vazio, metas_padrao, ARQUIVO)
 
-    df = pd.read_excel(arquivo, sheet_name="gastos")
-    metas = pd.read_excel(arquivo, sheet_name="metas")
+@st.cache_data(show_spinner=False)
+def carregar_excel_cached(path: str, mtime: float):
+    df = pd.read_excel(path, sheet_name="gastos")
+    metas = pd.read_excel(path, sheet_name="metas")
+    return df, metas
 
-    df = _ensure_schema(df)
-    metas = _normalizar_colunas(metas)
+def carregar_excel():
+    init_arquivo_se_faltar()
+    mtime = os.path.getmtime(ARQUIVO)
+    df_raw, metas_raw = carregar_excel_cached(ARQUIVO, mtime)
 
-    # Se tiver criado IDs agora, salva de volta para manter consistência
-    salvar_dados(arquivo, df, metas)
+    df, df_changed = _ensure_gastos_schema(df_raw)
+    metas, metas_changed = _ensure_metas_schema(metas_raw)
+
+    # Se precisou corrigir schema/IDs, grava uma vez e recarrega (evita inconsistência)
+    if df_changed or metas_changed:
+        salvar_excel(df, metas, ARQUIVO)
+        st.cache_data.clear()
+        st.rerun()
 
     return df, metas
 
-def gerar_excel_bytes(df: pd.DataFrame, metas: pd.DataFrame) -> bytes:
+def excel_bytes(df: pd.DataFrame, metas: pd.DataFrame) -> bytes:
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="gastos", index=False)
@@ -120,243 +121,257 @@ def gerar_excel_bytes(df: pd.DataFrame, metas: pd.DataFrame) -> bytes:
 
 def filtro_periodo(df: pd.DataFrame, ano: int, mes: int) -> pd.DataFrame:
     dfx = df.copy()
-    dfx["Data"] = pd.to_datetime(dfx["Data"], errors="coerce")
-    mask = (dfx["Data"].dt.year == ano) & (dfx["Data"].dt.month == mes)
-    dfx = dfx.loc[mask].copy()
-    dfx["Data"] = dfx["Data"].dt.date
-    return dfx
+    dfx["Data_dt"] = pd.to_datetime(dfx["Data"], errors="coerce")
+    mask = (dfx["Data_dt"].dt.year == ano) & (dfx["Data_dt"].dt.month == mes)
+    out = dfx.loc[mask].copy()
+    out.drop(columns=["Data_dt"], inplace=True, errors="ignore")
+    out, _ = _ensure_gastos_schema(out)
+    return out
 
-def soma_segura(s: pd.Series) -> float:
-    return float(pd.to_numeric(s, errors="coerce").fillna(0).sum())
+def restore_from_upload(uploaded_file) -> tuple[pd.DataFrame, pd.DataFrame]:
+    df_up = pd.read_excel(uploaded_file, sheet_name="gastos")
+    metas_up = pd.read_excel(uploaded_file, sheet_name="metas")
+    df_up, _ = _ensure_gastos_schema(df_up)
+    metas_up, _ = _ensure_metas_schema(metas_up)
+    salvar_excel(df_up, metas_up, ARQUIVO)
+    return df_up, metas_up
 
-# ------------------------------------------------------------
+# -----------------------------
 # APP
-# ------------------------------------------------------------
-df, metas = carregar_dados(ARQUIVO)
+# -----------------------------
+df, metas = carregar_excel()
 
-st.title("Controle Financeiro do Casal")
+# categorias
+cats = metas["Categoria"].dropna().astype(str).str.strip().tolist()
+cats_lanc = [c for c in cats if c.lower() != "geral" and c != ""]
+if not cats_lanc:
+    cats_lanc = ["Alimentação", "Transporte", "Moradia", "Lazer", "Outros"]
+
+# filtros de ano/mês (sem fazer coisa pesada)
+hoje = date.today()
+df_tmp = df.copy()
+df_tmp["Data_dt"] = pd.to_datetime(df_tmp["Data"], errors="coerce")
+anos = sorted([int(a) for a in df_tmp["Data_dt"].dt.year.dropna().unique().tolist()])
+if hoje.year not in anos:
+    anos = sorted(list(set(anos + [hoje.year])))
 
 with st.sidebar:
-    st.header("Filtros")
+    menu = st.radio("Menu", ["Lançar", "Resumo", "Gerenciar", "Backup/Restore"], index=0)
 
-    # anos disponíveis
-    df_tmp = df.copy()
-    df_tmp["Data_dt"] = pd.to_datetime(df_tmp["Data"], errors="coerce")
-    anos = sorted([int(a) for a in df_tmp["Data_dt"].dt.year.dropna().unique().tolist()])
-    hoje = date.today()
-    if hoje.year not in anos:
-        anos = sorted(list(set(anos + [hoje.year])))
-
+    st.divider()
+    st.subheader("Período")
     ano_sel = st.selectbox("Ano", anos, index=anos.index(hoje.year))
     mes_sel = st.selectbox("Mês", [m for m, _ in MESES], index=hoje.month - 1, format_func=lambda m: MES_NOME[m])
 
+st.title("Controle Financeiro do Casal")
+
+# -----------------------------
+# Lançar
+# -----------------------------
+if menu == "Lançar":
+    st.subheader("Novo gasto")
+
+    with st.form("novo_gasto"):
+        data_lcto = st.date_input("Data", date.today())
+        categoria = st.selectbox("Categoria", cats_lanc)
+        sub = st.text_input("Subcategoria (opcional)")
+        valor = st.number_input("Valor (R$)", min_value=0.0, step=1.0)
+        quem = st.selectbox("Quem pagou", PESSOAS)
+        pagamento = st.selectbox("Forma de pagamento", PAGAMENTOS)
+        obs = st.text_input("Observação")
+        salvar = st.form_submit_button("Salvar gasto")
+
+    if salvar:
+        novo = {
+            "ID": uuid.uuid4().hex,
+            "Data": data_lcto,
+            "Categoria": categoria,
+            "Subcategoria": sub,
+            "Valor": float(valor),
+            "Pagamento": pagamento,
+            "Quem": quem,
+            "Obs": obs,
+        }
+        df = pd.concat([df, pd.DataFrame([novo])], ignore_index=True)
+        salvar_excel(df, metas, ARQUIVO)
+        st.cache_data.clear()
+        st.success("Gasto salvo.")
+        st.rerun()
+
     st.divider()
-    st.header("Backup")
-    st.download_button(
-        label="Baixar planilha (Excel) atualizada",
-        data=gerar_excel_bytes(df, metas),
-        file_name="controle_financeiro_casal.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    st.subheader("Últimos lançamentos (geral)")
+    df_show = df.copy()
+    df_show["Data_dt"] = pd.to_datetime(df_show["Data"], errors="coerce")
+    st.dataframe(
+        df_show.sort_values("Data_dt", ascending=False)[["Data", "Categoria", "Subcategoria", "Valor", "Pagamento", "Quem", "Obs"]].head(30),
+        use_container_width=True
     )
 
-# Categorias (exclui "Geral" do lançamento)
-categorias = (
-    metas.get("Categoria", pd.Series([], dtype=str))
-    .dropna()
-    .astype(str)
-    .str.strip()
-    .unique()
-    .tolist()
-)
-categorias_lancamento = [c for c in categorias if c.lower() != "geral"]
-if not categorias_lancamento:
-    categorias_lancamento = ["Alimentação", "Transporte", "Moradia", "Lazer", "Outros"]
+# -----------------------------
+# Resumo
+# -----------------------------
+elif menu == "Resumo":
+    st.subheader(f"Resumo: {MES_NOME[mes_sel]}/{ano_sel}")
 
-# ------------------------------------------------------------
-# NOVO LANÇAMENTO
-# ------------------------------------------------------------
-st.subheader("Novo gasto")
+    df_periodo = filtro_periodo(df, ano_sel, mes_sel)
+    total = float(df_periodo["Valor"].sum()) if not df_periodo.empty else 0.0
+    st.metric("Total no período", f"R$ {total:,.2f}")
 
-with st.form("novo_gasto"):
-    data_lcto = st.date_input("Data", date.today())
-    categoria = st.selectbox("Categoria", categorias_lancamento)
-    sub = st.text_input("Subcategoria (opcional)")
-    valor = st.number_input("Valor (R$)", min_value=0.0, step=1.0)
-    quem = st.selectbox("Quem pagou", PESSOAS)
-    pagamento = st.selectbox("Forma de pagamento", PAGAMENTOS)
-    obs = st.text_input("Observação")
+    if df_periodo.empty:
+        st.info("Sem lançamentos neste período.")
+    else:
+        st.divider()
+        st.subheader("Por categoria")
+        resumo_cat = (
+            df_periodo.groupby("Categoria")["Valor"]
+            .sum()
+            .sort_values(ascending=False)
+            .reset_index()
+        )
+        st.dataframe(resumo_cat, use_container_width=True)
 
-    salvar = st.form_submit_button("Salvar gasto")
+        st.subheader("Por pessoa")
+        resumo_pessoa = (
+            df_periodo.groupby("Quem")["Valor"]
+            .sum()
+            .sort_values(ascending=False)
+            .reset_index()
+        )
+        st.dataframe(resumo_pessoa, use_container_width=True)
 
-if salvar:
-    novo = {
-        "ID": uuid.uuid4().hex,
-        "Data": data_lcto,
-        "Categoria": categoria,
-        "Subcategoria": sub,
-        "Valor": float(valor),
-        "Pagamento": pagamento,
-        "Quem": quem,
-        "Obs": obs,
-    }
-    df = pd.concat([df, pd.DataFrame([novo])], ignore_index=True)
-    salvar_dados(ARQUIVO, df, metas)
-    st.success("Gasto salvo.")
-    df, metas = carregar_dados(ARQUIVO)
+        st.subheader("Por forma de pagamento")
+        resumo_pag = (
+            df_periodo.groupby("Pagamento")["Valor"]
+            .sum()
+            .sort_values(ascending=False)
+            .reset_index()
+        )
+        st.dataframe(resumo_pag, use_container_width=True)
 
-# ------------------------------------------------------------
-# PAINEL DO PERÍODO
-# ------------------------------------------------------------
-st.divider()
-st.subheader(f"Painel do período: {MES_NOME[mes_sel]}/{ano_sel}")
+# -----------------------------
+# Gerenciar (editar/apagar)
+# -----------------------------
+elif menu == "Gerenciar":
+    st.subheader("Gerenciar lançamentos (editar / apagar)")
 
-df_periodo = filtro_periodo(df, ano_sel, mes_sel)
-total_periodo = soma_segura(df_periodo["Valor"]) if not df_periodo.empty else 0.0
-st.metric("Total no período", f"R$ {total_periodo:,.2f}")
+    df_periodo = filtro_periodo(df, ano_sel, mes_sel)
 
-# ------------------------------------------------------------
-# GERENCIAR LANÇAMENTOS (EDITAR / APAGAR)
-# ------------------------------------------------------------
-st.divider()
-st.subheader("Gerenciar lançamentos (editar / apagar)")
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        editar_todos = st.checkbox("Editar todos (não só o período)", value=False)
+    with col2:
+        mostrar_id = st.checkbox("Mostrar ID", value=False)
 
-colA, colB = st.columns([1, 1])
-with colA:
-    editar_todos = st.checkbox("Editar todos os lançamentos (não só o período)", value=False)
-with colB:
-    mostrar_id = st.checkbox("Mostrar coluna ID", value=False)
+    df_view = df.copy() if editar_todos else df_periodo.copy()
 
-df_view = df.copy() if editar_todos else df_periodo.copy()
+    if df_view.empty:
+        st.info("Sem lançamentos para este filtro.")
+    else:
+        st.caption("Para apagar: remova a linha na tabela e clique em 'Salvar alterações'. Para apagar com segurança, use 'Mostrar ID' ligado.")
 
-if df_view.empty:
-    st.write("Não há lançamentos para gerenciar neste filtro.")
+        cols_show = GASTOS_COLS if mostrar_id else [c for c in GASTOS_COLS if c != "ID"]
+
+        df_editor_base = df_view.copy()
+        df_editor_base["Data"] = pd.to_datetime(df_editor_base["Data"], errors="coerce").dt.strftime("%Y-%m-%d")
+
+        edited = st.data_editor(
+            df_editor_base[cols_show],
+            num_rows="dynamic",
+            use_container_width=True,
+            key=f"editor_{'ALL' if editar_todos else 'PER'}_{ano_sel}_{mes_sel}",
+        )
+
+        # recoloca ID se oculto (para conseguir salvar no mesmo padrão)
+        if not mostrar_id:
+            edited = edited.copy()
+            edited.insert(0, "ID", df_editor_base["ID"].iloc[: len(edited)].values)
+
+        b1, b2 = st.columns([1, 2])
+        with b1:
+            salvar_alt = st.button("Salvar alterações", type="primary")
+        with b2:
+            st.caption("Se duas pessoas editarem ao mesmo tempo, o último a salvar prevalece.")
+
+        if salvar_alt:
+            try:
+                for c in GASTOS_COLS:
+                    if c not in edited.columns:
+                        edited[c] = ""
+
+                edited = edited[GASTOS_COLS].copy()
+                edited["Data"] = pd.to_datetime(edited["Data"], errors="coerce").dt.date
+                edited["Valor"] = pd.to_numeric(edited["Valor"], errors="coerce").fillna(0.0)
+
+                base = df.copy()
+                base, _ = _ensure_gastos_schema(base)
+
+                edited_ids = set(edited["ID"].astype(str).tolist())
+                base_keep = base.loc[~base["ID"].astype(str).isin(edited_ids)].copy()
+
+                final_df = pd.concat([base_keep, edited], ignore_index=True)
+                final_df, _ = _ensure_gastos_schema(final_df)
+
+                salvar_excel(final_df, metas, ARQUIVO)
+                st.cache_data.clear()
+                st.success("Alterações salvas.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erro ao salvar alterações: {e}")
+
+        st.divider()
+        st.subheader("Excluir lançamento rápido")
+
+        df_sel = df_view.copy()
+        df_sel["DataStr"] = pd.to_datetime(df_sel["Data"], errors="coerce").dt.strftime("%d/%m/%Y")
+        df_sel["Rotulo"] = df_sel.apply(
+            lambda r: f"{r['DataStr']} | {r['Categoria']} | R$ {float(r['Valor']):,.2f} | {r['Quem']} | {r['Pagamento']} | ID={r['ID']}",
+            axis=1,
+        )
+
+        escolha = st.selectbox("Selecione", df_sel["Rotulo"].tolist())
+        confirmar = st.checkbox("Confirmo a exclusão definitiva", value=False)
+
+        if st.button("Excluir selecionado") and confirmar:
+            id_escolhido = escolha.split("ID=")[-1].strip()
+            df_new = df.loc[df["ID"].astype(str) != id_escolhido].copy()
+            salvar_excel(df_new, metas, ARQUIVO)
+            st.cache_data.clear()
+            st.success("Lançamento excluído.")
+            st.rerun()
+
+# -----------------------------
+# Backup / Restore (sob demanda)
+# -----------------------------
 else:
-    # Guarda IDs originais da visão para merge correto ao salvar
-    view_key = f"VIEW::{ano_sel}-{mes_sel}::{'ALL' if editar_todos else 'PERIODO'}"
-    st.session_state[view_key] = df_view["ID"].tolist()
+    st.subheader("Backup / Restore")
 
-    # Configuração de colunas no editor
-    cols_exibir = ["ID", "Data", "Categoria", "Subcategoria", "Valor", "Pagamento", "Quem", "Obs"]
-    if not mostrar_id:
-        cols_exibir = ["Data", "Categoria", "Subcategoria", "Valor", "Pagamento", "Quem", "Obs"]
+    st.write("O backup em Excel pode ser pesado. Aqui ele só é gerado quando você pedir.")
 
-    df_editor_base = df_view[["ID", "Data", "Categoria", "Subcategoria", "Valor", "Pagamento", "Quem", "Obs"]].copy()
+    if "backup_bytes" not in st.session_state:
+        st.session_state["backup_bytes"] = None
 
-    st.write("Edite valores diretamente. Para apagar, remova a linha na tabela (e depois clique em 'Salvar alterações').")
+    if st.button("Gerar backup Excel"):
+        st.session_state["backup_bytes"] = excel_bytes(df, metas)
 
-    edited = st.data_editor(
-        df_editor_base if mostrar_id else df_editor_base.drop(columns=["ID"]),
-        num_rows="dynamic",
-        use_container_width=True,
-        key=f"editor::{view_key}",
-    )
+    if st.session_state["backup_bytes"]:
+        st.download_button(
+            "Baixar Excel atualizado (backup)",
+            data=st.session_state["backup_bytes"],
+            file_name="controle_financeiro_casal_backup.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
-    # Ao editar sem mostrar ID, recoloca ID usando a visão original e posição das linhas
-    # (Para delete funcionar corretamente, recomendamos deixar 'Mostrar coluna ID' ligado.)
-    if not mostrar_id:
-        # Reconstroi com IDs por aproximação: assume que linhas restantes correspondem às primeiras N do original
-        # Melhor prática: use mostrar_id=True quando for apagar linhas.
-        ids_orig = st.session_state[view_key]
-        edited = edited.copy()
-        edited.insert(0, "ID", ids_orig[: len(edited)])
-
-    # Botões de ação
-    c1, c2, c3 = st.columns([1, 1, 2])
-
-    with c1:
-        salvar_alteracoes = st.button("Salvar alterações", type="primary")
-    with c2:
-        recarregar = st.button("Recarregar dados")
-    with c3:
-        st.caption("Dica: para apagar com segurança, marque 'Mostrar coluna ID', apague a linha e salve.")
-
-    if recarregar:
-        df, metas = carregar_dados(ARQUIVO)
-        st.rerun()
-
-    if salvar_alteracoes:
-        # Normaliza e valida o dataframe editado
-        edited = edited.copy()
-        edited = _normalizar_colunas(edited)
-
-        # Garante colunas presentes
-        for c in ["ID", "Data", "Categoria", "Subcategoria", "Valor", "Pagamento", "Quem", "Obs"]:
-            if c not in edited.columns:
-                edited[c] = pd.NA
-
-        edited["ID"] = edited["ID"].astype("string")
-        edited["Data"] = _to_datetime_series(edited["Data"]).dt.date
-        edited["Valor"] = pd.to_numeric(edited["Valor"], errors="coerce").fillna(0.0)
-        for c in ["Categoria", "Subcategoria", "Pagamento", "Quem", "Obs"]:
-            edited[c] = edited[c].astype("string").fillna("").astype(str)
-
-        # Merge: remove da base os IDs da visão original e coloca os editados no lugar
-        ids_para_substituir = set(st.session_state[view_key])
-        df_outros = df.loc[~df["ID"].isin(ids_para_substituir)].copy()
-
-        df_novo = pd.concat([df_outros, edited[["ID", "Data", "Categoria", "Subcategoria", "Valor", "Pagamento", "Quem", "Obs"]]], ignore_index=True)
-        df_novo = _ensure_schema(df_novo)
-
-        salvar_dados(ARQUIVO, df_novo, metas)
-        st.success("Alterações salvas.")
-        df, metas = carregar_dados(ARQUIVO)
-        st.rerun()
-
-    # Exclusão rápida (opcional)
     st.divider()
-    st.subheader("Excluir lançamento rápido (opcional)")
+    st.subheader("Restore (restaurar backup)")
 
-    # Cria rótulos para seleção
-    df_sel = df_view.copy()
-    df_sel["Data"] = pd.to_datetime(df_sel["Data"], errors="coerce").dt.strftime("%d/%m/%Y")
-    df_sel["Rotulo"] = df_sel.apply(
-        lambda r: f"{r['Data']} | {r['Categoria']} | R$ {float(r['Valor']):,.2f} | {r['Quem']} | {r['Pagamento']} | ID={r['ID']}",
-        axis=1
-    )
+    up = st.file_uploader("Enviar backup (.xlsx)", type=["xlsx"])
+    confirm_restore = st.checkbox("Confirmo que quero restaurar (substitui os dados atuais)", value=False)
 
-    escolha = st.selectbox("Selecione um lançamento para excluir", df_sel["Rotulo"].tolist())
-    confirmar = st.checkbox("Confirmo a exclusão definitiva deste lançamento", value=False)
-
-    if st.button("Excluir selecionado") and confirmar:
-        id_escolhido = escolha.split("ID=")[-1].strip()
-        df = df.loc[df["ID"] != id_escolhido].copy()
-        salvar_dados(ARQUIVO, df, metas)
-        st.success("Lançamento excluído.")
-        df, metas = carregar_dados(ARQUIVO)
-        st.rerun()
-
-# ------------------------------------------------------------
-# RESUMOS
-# ------------------------------------------------------------
-st.divider()
-st.subheader("Resumo do período")
-
-if df_periodo.empty:
-    st.write("Sem lançamentos neste período.")
-else:
-    resumo_cat = (
-        df_periodo.groupby("Categoria")["Valor"]
-        .sum()
-        .sort_values(ascending=False)
-        .reset_index()
-    )
-    st.write("Por categoria")
-    st.dataframe(resumo_cat, use_container_width=True)
-
-    resumo_pessoa = (
-        df_periodo.groupby("Quem")["Valor"]
-        .sum()
-        .sort_values(ascending=False)
-        .reset_index()
-    )
-    st.write("Por pessoa")
-    st.dataframe(resumo_pessoa, use_container_width=True)
-
-    resumo_pag = (
-        df_periodo.groupby("Pagamento")["Valor"]
-        .sum()
-        .sort_values(ascending=False)
-        .reset_index()
-    )
-    st.write("Por forma de pagamento")
-    st.dataframe(resumo_pag, use_container_width=True)
+    if st.button("Restaurar backup", type="primary") and up is not None and confirm_restore:
+        try:
+            df, metas = restore_from_upload(up)
+            st.cache_data.clear()
+            st.success("Backup restaurado.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Falha ao restaurar backup: {e}")
