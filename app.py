@@ -19,6 +19,14 @@ LOCKFILE = f"{ARQUIVO}.lock"
 PAGAMENTOS = ["PIX", "Boleto", "Cartão Pão de Açucar", "Cartão Nubank", "Swile", "Pluxee"]
 PESSOAS = ["Roney", "Adriele"]
 
+# -----------------------------
+# CARTÕES / REGRAS ANTI-DUPLICIDADE
+# -----------------------------
+CARTOES = ["Cartão Pão de Açucar", "Cartão Nubank"]
+
+# Se Origem for uma destas, NÃO entra nos totais (evita duplicar compra no cartão + pagamento da fatura)
+ORIGENS_NAO_CONTABILIZAR = ["PAGTO_FATURA"]
+
 MESES = [
     (1, "Janeiro"), (2, "Fevereiro"), (3, "Março"), (4, "Abril"),
     (5, "Maio"), (6, "Junho"), (7, "Julho"), (8, "Agosto"),
@@ -1259,3 +1267,4 @@ else:
         df_gastos, df_metas, df_fixas, df_reservas, df_mov_res = restore_from_upload(up)
         st.success("Backup restaurado.")
         st.rerun()
+
