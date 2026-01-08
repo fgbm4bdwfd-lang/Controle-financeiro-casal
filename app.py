@@ -1,4 +1,3 @@
-import html as _html    
 import os
 import io
 import uuid
@@ -17,10 +16,7 @@ st.set_page_config(page_title="Controle Financeiro", layout="centered")
 ARQUIVO = "dados.xlsx"
 LOCKFILE = f"{ARQUIVO}.lock"
 
-# Forma de pagamento (inclui BOLETO)
-PAGAMENTOS = ["PIX", "Boleto", "Cartão Pão de Açucar", "Cartão Nubank", "Swile", "Pluxee"]
-CARTOES = ["Cartão Pão de Açucar", "Cartão Nubank"]
-
+PAGAMENTOS = ["PIX", "Cartão Pão de Açucar", "Cartão Nubank", "Swile", "Pluxee"]
 PESSOAS = ["Roney", "Adriele"]
 
 MESES = [
@@ -29,12 +25,6 @@ MESES = [
     (9, "Setembro"), (10, "Outubro"), (11, "Novembro"), (12, "Dezembro"),
 ]
 MES_NOME = {n: nome for n, nome in MESES}
-
-TIPOS_LANC = [
-    "Despesa",
-    "Pagamento de fatura (não conta nas metas)",
-    "Transferência",
-]
 
 # -----------------------------
 # FORMATADORES (MOEDA / %)
@@ -56,31 +46,72 @@ def fmt_pct(v) -> str:
     return f"{x:.2f}%"
 
 # -----------------------------
-# DATA HELPERS
+# UI: METRIC FONT + BARRA (linha azul com valor/% no fim)
 # -----------------------------
-def ultimo_dia_mes(ano: int, mes: int) -> int:
-    return calendar.monthrange(ano, mes)[1]
+def set_metric_font(value_rem: str = "1.35rem", label_rem: str = "0.85rem"):
+    st.markdown(
+        f"""
+        <style>
+        div[data-testid="stMetricValue"] {{ font-size: {value_rem} !important; }}
+        div[data-testid="stMetricLabel"] {{ font-size: {label_rem} !important; }}
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
 
-def add_months_keep_day(d: date, months: int) -> date:
-    # soma meses preservando o dia; se não existir, cai no último dia do mês
-    y = d.year + (d.month - 1 + months) // 12
-    m = (d.month - 1 + months) % 12 + 1
-    ld = ultimo_dia_mes(y, m)
-    day = min(d.day, ld)
-    return date(y, m, day)
+def inject_progress_css():
+    st.markdown(
+        """
+        <style>
+        .ttbar{margin:0.25rem 0 0.75rem 0;}
+        .ttbar-row{display:flex;justify-content:space-between;gap:0.75rem;font-size:0.90rem;line-height:1.2;}
+        .ttbar-label{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:70%;}
+        .ttbar-right{font-variant-numeric:tabular-nums;white-space:nowrap;}
+        .ttbar-track{width:100%;height:10px;border-radius:999px;background:rgba(49,51,63,0.15);overflow:hidden;}
+        .ttbar-fill{height:10px;background:var(--primary-color);border-radius:999px;}
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+def progress_line(label: str, value: float, total: float, right_text: str | None = None):
+    try:
+        v = float(value)
+    except Exception:
+        v = 0.0
+    try:
+        t = float(total)
+    except Exception:
+        t = 0.0
+
+    pct = 0.0
+    if t > 0:
+        pct = max(0.0, min(v / t, 1.0))
+
+    if right_text is None:
+        right_text = f"{fmt_brl(v)} | {fmt_pct(pct * 100.0)}"
+
+    st.markdown(
+        f"""
+        <div class="ttbar">
+          <div class="ttbar-row">
+            <div class="ttbar-label">{label}</div>
+            <div class="ttbar-right">{right_text}</div>
+          </div>
+          <div class="ttbar-track">
+            <div class="ttbar-fill" style="width:{pct*100.0:.1f}%"></div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+inject_progress_css()
 
 # -----------------------------
 # COLUNAS / SCHEMAS
 # -----------------------------
-GASTOS_COLS = [
-    "ID", "Data", "Categoria", "Subcategoria", "Valor", "Pagamento", "Quem", "Obs",
-    "Origem", "RefFixa",
-    "Tipo",            # Despesa | Pagamento de fatura | Transferência
-    "CartaoFatura",    # qual cartão (apenas quando Tipo = Pagamento de fatura)
-    "GrupoParc",       # id do parcelamento
-    "Parcela",         # nro parcela
-    "TotalParcelas",   # total parcelas
-]
+GASTOS_COLS = ["ID", "Data", "Categoria", "Subcategoria", "Valor", "Pagamento", "Quem", "Obs", "Origem", "RefFixa"]
 METAS_COLS = ["Categoria", "Meta"]
 FIXAS_COLS = ["ID_Fixa", "Descricao", "Categoria", "Valor", "Dia_Venc", "Pagamento", "Quem", "Ativo", "Obs"]
 
@@ -90,7 +121,7 @@ MOVRES_COLS = ["ID_Mov", "Data", "ID_Reserva", "Reserva", "Tipo", "Valor", "Quem
 # -----------------------------
 # LOCK
 # -----------------------------
-def acquire_lock(lock_path: str, stale_seconds: int = 180, timeout_seconds: int = 6) -> bool:
+def acquire_lock(lock_path: str, stale_seconds: int = 180, timeout_seconds: int = 5) -> bool:
     start = time.time()
     while True:
         try:
@@ -148,20 +179,8 @@ def _ensure_gastos_schema(df: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
     df["Data"] = pd.to_datetime(df["Data"], errors="coerce").dt.date
     df["Valor"] = pd.to_numeric(df["Valor"], errors="coerce").fillna(0.0)
 
-    # strings
-    for c in ["Categoria", "Subcategoria", "Pagamento", "Quem", "Obs", "Origem", "RefFixa", "Tipo", "CartaoFatura", "GrupoParc"]:
+    for c in ["Categoria", "Subcategoria", "Pagamento", "Quem", "Obs", "Origem", "RefFixa"]:
         df[c] = df[c].astype("string").fillna("").astype(str)
-
-    # default Tipo = Despesa
-    tipo = df["Tipo"].astype(str).str.strip()
-    mask_vazio = (tipo == "")
-    if mask_vazio.any():
-        df.loc[mask_vazio, "Tipo"] = "Despesa"
-        changed = True
-
-    # parcelas
-    df["Parcela"] = pd.to_numeric(df["Parcela"], errors="coerce").fillna(0).astype(int)
-    df["TotalParcelas"] = pd.to_numeric(df["TotalParcelas"], errors="coerce").fillna(0).astype(int)
 
     return df[GASTOS_COLS].copy(), changed
 
@@ -211,6 +230,7 @@ def _ensure_fixas_schema(fixas: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
         changed = True
 
     fixas["Obs"] = fixas["Obs"].astype("string").fillna("").astype(str)
+
     fixas = fixas[fixas["Descricao"].astype(str).str.strip() != ""].copy()
     return fixas[FIXAS_COLS].copy(), changed
 
@@ -237,6 +257,7 @@ def _ensure_reservas_schema(res: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
         changed = True
 
     res["Obs"] = res["Obs"].astype("string").fillna("").astype(str)
+
     res = res[res["Reserva"].astype(str).str.strip() != ""].copy()
     return res[RESERVAS_COLS].copy(), changed
 
@@ -411,6 +432,7 @@ def carregar_excel():
     m, chg_m = _ensure_metas_schema(res["metas"])
     f, chg_f = _ensure_fixas_schema(res["fixas"])
     r, chg_r = _ensure_reservas_schema(res["reservas"])
+    mov, chg_mov = _ensure_movres_schema(res(res["mov_res"]) if False else res["mov_res"])  # placeholder
     mov, chg_mov = _ensure_movres_schema(res["mov_res"])
 
     if chg_g or chg_m or chg_f or chg_r or chg_mov:
@@ -441,7 +463,7 @@ def restore_from_upload(uploaded_file):
     return g, m, f, r, mov
 
 # -----------------------------
-# HELPERS (filtros / metas / fixas)
+# HELPERS
 # -----------------------------
 def filtro_periodo_gastos(df: pd.DataFrame, ano: int, mes: int) -> pd.DataFrame:
     dfx = df.copy()
@@ -451,6 +473,9 @@ def filtro_periodo_gastos(df: pd.DataFrame, ano: int, mes: int) -> pd.DataFrame:
     out.drop(columns=["Data_dt"], inplace=True, errors="ignore")
     out, _ = _ensure_gastos_schema(out)
     return out
+
+def ultimo_dia_mes(ano: int, mes: int) -> int:
+    return calendar.monthrange(ano, mes)[1]
 
 def get_meta_geral(df_metas: pd.DataFrame) -> float:
     s = df_metas[df_metas["Categoria"].astype(str).str.strip().str.lower() == "geral"]["Meta"]
@@ -471,26 +496,18 @@ def set_meta_geral(df_metas: pd.DataFrame, novo_valor: float) -> pd.DataFrame:
     m, _ = _ensure_metas_schema(m)
     return m
 
-def apenas_despesas(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df.copy()
-    x = df.copy()
-    x["Tipo"] = x["Tipo"].astype(str).str.strip()
-    # só conta "Despesa"
-    return x[x["Tipo"].str.lower() == "despesa"].copy()
-
-def separar_fixas(df_periodo_despesas: pd.DataFrame, df_fixas: pd.DataFrame):
+def separar_fixas(df_periodo: pd.DataFrame, df_fixas: pd.DataFrame):
     fixas_ativas = df_fixas[df_fixas["Ativo"] == True].copy()
     fixas_total = float(fixas_ativas["Valor"].sum()) if not fixas_ativas.empty else 0.0
 
-    if df_periodo_despesas.empty or fixas_ativas.empty:
-        return fixas_total, 0.0, fixas_total, df_periodo_despesas.copy()
+    if df_periodo.empty or fixas_ativas.empty:
+        return fixas_total, 0.0, fixas_total, df_periodo.copy()
 
     ids_fixas = set(fixas_ativas["ID_Fixa"].astype(str).str.strip().tolist())
     cats_fixas = set(fixas_ativas["Categoria"].astype(str).str.strip().tolist())
     desc_fixas = set(fixas_ativas["Descricao"].astype(str).str.strip().tolist())
 
-    g = df_periodo_despesas.copy()
+    g = df_periodo.copy()
     g["Origem"] = g["Origem"].astype(str)
     g["RefFixa"] = g["RefFixa"].astype(str)
     g["Categoria"] = g["Categoria"].astype(str).str.strip()
@@ -557,11 +574,6 @@ def gerar_lancamentos_fixas(df_gastos: pd.DataFrame, df_fixas: pd.DataFrame, ano
             "Obs": (f"Conta fixa: {desc}" if desc else "Conta fixa") + (f" | {obs}" if obs else ""),
             "Origem": "FIXA",
             "RefFixa": ref,
-            "Tipo": "Despesa",
-            "CartaoFatura": "",
-            "GrupoParc": "",
-            "Parcela": 0,
-            "TotalParcelas": 0,
         }
 
         g = pd.concat([g, pd.DataFrame([novo])], ignore_index=True)
@@ -639,119 +651,44 @@ st.title("Controle Financeiro do Casal")
 # LANÇAR
 # -----------------------------
 if menu == "Lançar":
-    st.subheader("Novo lançamento")
+    st.subheader("Novo gasto")
 
     with st.form("novo_gasto"):
-        tipo = st.selectbox("Tipo", TIPOS_LANC, index=0)
-
         data_lcto = st.date_input("Data", date.today())
-
-        # Campos variam conforme tipo
-        cartao_fatura = ""
-        if tipo.startswith("Pagamento de fatura"):
-            cartao_fatura = st.selectbox("Cartão da fatura", CARTOES)
-            categoria = "Fatura de Cartão"
-            sub = st.text_input("Observação curta (opcional)", value=f"{cartao_fatura}")
-        else:
-            categoria = st.selectbox("Categoria", cats_lanc)
-            sub = st.text_input("Subcategoria (opcional)")
-
+        categoria = st.selectbox("Categoria", cats_lanc)
+        sub = st.text_input("Subcategoria (opcional)")
         valor = st.number_input("Valor (R$)", min_value=0.0, step=1.0)
-
-        # Parcelamento (somente para DESPESA)
-        parcelado = False
-        n_parcelas = 1
-        data_primeira = data_lcto
-        if tipo == "Despesa":
-            parcelado = st.checkbox("Parcelado?")
-            if parcelado:
-                n_parcelas = st.number_input("Número de parcelas", min_value=2, max_value=48, step=1, value=2)
-                data_primeira = st.date_input("Data da 1ª parcela", data_lcto)
-
-        quem = st.selectbox("Quem", PESSOAS)
+        quem = st.selectbox("Quem pagou", PESSOAS)
         pagamento = st.selectbox("Forma de pagamento", PAGAMENTOS)
         obs = st.text_input("Observação")
-
-        salvar = st.form_submit_button("Salvar")
+        salvar = st.form_submit_button("Salvar gasto")
 
     if salvar:
-        if tipo == "Despesa" and parcelado:
-            grupo = uuid.uuid4().hex
-
-            total = float(valor)
-            parcelas = int(n_parcelas)
-
-            # divide em centavos pra fechar exatamente
-            total_cent = int(round(total * 100))
-            base_cent = total_cent // parcelas
-            resto = total_cent - base_cent * parcelas
-
-            novos = []
-            for i in range(parcelas):
-                cent = base_cent + (1 if i < resto else 0)
-                v_parc = cent / 100.0
-                d_parc = add_months_keep_day(data_primeira, i)
-
-                sub_txt = (sub or "").strip()
-                if sub_txt:
-                    sub_txt = f"{sub_txt} ({i+1}/{parcelas})"
-                else:
-                    sub_txt = f"Parcela {i+1}/{parcelas}"
-
-                novo = {
-                    "ID": uuid.uuid4().hex,
-                    "Data": d_parc,
-                    "Categoria": str(categoria),
-                    "Subcategoria": sub_txt,
-                    "Valor": float(v_parc),
-                    "Pagamento": str(pagamento),
-                    "Quem": str(quem),
-                    "Obs": str(obs),
-                    "Origem": "",
-                    "RefFixa": "",
-                    "Tipo": "Despesa",
-                    "CartaoFatura": "",
-                    "GrupoParc": grupo,
-                    "Parcela": i + 1,
-                    "TotalParcelas": parcelas,
-                }
-                novos.append(novo)
-
-            df_gastos = pd.concat([df_gastos, pd.DataFrame(novos)], ignore_index=True)
-        else:
-            novo = {
-                "ID": uuid.uuid4().hex,
-                "Data": data_lcto,
-                "Categoria": str(categoria) if categoria else "Outros",
-                "Subcategoria": str(sub),
-                "Valor": float(valor),
-                "Pagamento": str(pagamento),
-                "Quem": str(quem),
-                "Obs": str(obs),
-                "Origem": "",
-                "RefFixa": "",
-                "Tipo": str(tipo),
-                "CartaoFatura": str(cartao_fatura) if tipo.startswith("Pagamento de fatura") else "",
-                "GrupoParc": "",
-                "Parcela": 0,
-                "TotalParcelas": 0,
-            }
-            df_gastos = pd.concat([df_gastos, pd.DataFrame([novo])], ignore_index=True)
-
-        df_gastos, _ = _ensure_gastos_schema(df_gastos)
+        novo = {
+            "ID": uuid.uuid4().hex,
+            "Data": data_lcto,
+            "Categoria": categoria,
+            "Subcategoria": sub,
+            "Valor": float(valor),
+            "Pagamento": pagamento,
+            "Quem": quem,
+            "Obs": obs,
+            "Origem": "",
+            "RefFixa": "",
+        }
+        df_gastos = pd.concat([df_gastos, pd.DataFrame([novo])], ignore_index=True)
         salvar_excel(df_gastos, df_metas, df_fixas, df_reservas, df_mov_res, ARQUIVO)
         st.cache_data.clear()
         st.rerun()
 
     st.divider()
-    st.subheader("Últimos lançamentos (30)")
+    st.subheader("Últimos lançamentos")
     show = df_gastos.copy()
     show["Data_dt"] = pd.to_datetime(show["Data"], errors="coerce")
     show = show.sort_values("Data_dt", ascending=False).head(30).copy()
     show["Valor"] = show["Valor"].map(fmt_brl)
-    # mostra Tipo (pra ficar claro o que é fatura)
     st.dataframe(
-        show[["Data", "Tipo", "Categoria", "Subcategoria", "Valor", "Pagamento", "Quem", "Obs"]],
+        show[["Data", "Categoria", "Subcategoria", "Valor", "Pagamento", "Quem", "Obs"]],
         use_container_width=True
     )
 
@@ -759,12 +696,13 @@ if menu == "Lançar":
 # RESUMO
 # -----------------------------
 elif menu == "Resumo":
+    set_metric_font("1.35rem", "0.85rem")
+
     st.subheader(f"Resumo: {MES_NOME[mes_sel]}/{ano_sel}")
 
     df_periodo = filtro_periodo_gastos(df_gastos, ano_sel, mes_sel)
-    df_periodo_despesas = apenas_despesas(df_periodo)
 
-    fixas_total, fixas_lancadas, fixas_restantes, df_variaveis = separar_fixas(df_periodo_despesas, df_fixas)
+    fixas_total, fixas_lancadas, fixas_restantes, df_variaveis = separar_fixas(df_periodo, df_fixas)
 
     gasto_variavel_mes = float(df_variaveis["Valor"].sum()) if not df_variaveis.empty else 0.0
     total_prev = gasto_variavel_mes + fixas_restantes
@@ -780,8 +718,14 @@ elif menu == "Resumo":
 
     st.caption(f"Fixas ativas do mês: {fmt_brl(fixas_total)} | Já lançadas/pagas (estimado): {fmt_brl(fixas_lancadas)}")
 
+    # Linha azul com valor/% no fim (Meta geral)
     if meta_geral > 0:
-        st.progress(min(total_prev / meta_geral, 1.0))
+        progress_line(
+            "Meta geral (projeção do mês)",
+            total_prev,
+            meta_geral,
+            right_text=f"{fmt_brl(total_prev)} | {fmt_pct(perc_meta_geral)}"
+        )
 
     st.divider()
     st.subheader("Por categoria (lançado - sem fixas)")
@@ -795,27 +739,35 @@ elif menu == "Resumo":
             .reset_index()
         )
         total_cat = float(resumo_cat["Valor"].sum())
+
+        # Barras (linha) com valor/% no fim
+        for _, r in resumo_cat.iterrows():
+            v = float(r["Valor"])
+            pct = (v / total_cat * 100.0) if total_cat > 0 else 0.0
+            progress_line(
+                str(r["Categoria"]),
+                v,
+                total_cat,
+                right_text=f"{fmt_brl(v)} | {fmt_pct(pct)}"
+            )
+
+        # Mantém tabela como estava
         resumo_cat["Percentual"] = (resumo_cat["Valor"] / total_cat * 100.0) if total_cat > 0 else 0.0
+        resumo_cat_disp = resumo_cat.copy()
+        resumo_cat_disp["Valor"] = resumo_cat_disp["Valor"].map(fmt_brl)
+        resumo_cat_disp["Percentual"] = resumo_cat_disp["Percentual"].map(fmt_pct)
+        st.dataframe(resumo_cat_disp[["Categoria", "Valor", "Percentual"]], use_container_width=True)
 
-        resumo_cat["Valor"] = resumo_cat["Valor"].map(fmt_brl)
-        resumo_cat["Percentual"] = resumo_cat["Percentual"].map(fmt_pct)
-        st.dataframe(resumo_cat[["Categoria", "Valor", "Percentual"]], use_container_width=True)
-
-    st.subheader("Por forma de pagamento (lançado - sem fixas)")
-    if df_variaveis.empty:
-        st.info("Sem lançamentos variáveis no período.")
-    else:
-        resumo_pag = (
-            df_variaveis.groupby("Pagamento")["Valor"]
+    st.subheader("Por pessoa (lançado - sem fixas)")
+    if not df_variaveis.empty:
+        resumo_pessoa = (
+            df_variaveis.groupby("Quem")["Valor"]
             .sum()
             .sort_values(ascending=False)
             .reset_index()
         )
-        total_pag = float(resumo_pag["Valor"].sum())
-        resumo_pag["Percentual"] = (resumo_pag["Valor"] / total_pag * 100.0) if total_pag > 0 else 0.0
-        resumo_pag["Valor"] = resumo_pag["Valor"].map(fmt_brl)
-        resumo_pag["Percentual"] = resumo_pag["Percentual"].map(fmt_pct)
-        st.dataframe(resumo_pag[["Pagamento", "Valor", "Percentual"]], use_container_width=True)
+        resumo_pessoa["Valor"] = resumo_pessoa["Valor"].map(fmt_brl)
+        st.dataframe(resumo_pessoa, use_container_width=True)
 
 # -----------------------------
 # GERENCIAR (Lançamentos)
@@ -829,15 +781,15 @@ elif menu == "Gerenciar":
     with c1:
         editar_todos = st.checkbox("Editar todos (não só o período)", value=False)
     with c2:
-        mostrar_colunas_tecnicas = st.checkbox("Mostrar colunas técnicas (Origem/RefFixa/Parcelas)", value=False)
+        mostrar_colunas_tecnicas = st.checkbox("Mostrar colunas técnicas (Origem/RefFixa)", value=False)
 
     df_view = df_gastos.copy() if editar_todos else df_periodo.copy()
 
     if df_view.empty:
         st.info("Sem lançamentos para este filtro.")
     else:
-        base_cols = ["Data", "Tipo", "Categoria", "Subcategoria", "Valor", "Pagamento", "Quem", "Obs", "CartaoFatura"]
-        tech_cols = ["Origem", "RefFixa", "GrupoParc", "Parcela", "TotalParcelas"]
+        base_cols = ["Data", "Categoria", "Subcategoria", "Valor", "Pagamento", "Quem", "Obs"]
+        tech_cols = ["Origem", "RefFixa"]
         cols_show = ["ID"] + base_cols + (tech_cols if mostrar_colunas_tecnicas else [])
 
         df_editor_base = df_view.copy()
@@ -854,12 +806,9 @@ elif menu == "Gerenciar":
             for c in GASTOS_COLS:
                 if c not in edited.columns:
                     edited[c] = ""
-
             edited = edited[GASTOS_COLS].copy()
             edited["Data"] = pd.to_datetime(edited["Data"], errors="coerce").dt.date
             edited["Valor"] = pd.to_numeric(edited["Valor"], errors="coerce").fillna(0.0)
-            edited["Parcela"] = pd.to_numeric(edited["Parcela"], errors="coerce").fillna(0).astype(int)
-            edited["TotalParcelas"] = pd.to_numeric(edited["TotalParcelas"], errors="coerce").fillna(0).astype(int)
 
             base = df_gastos.copy()
             base, _ = _ensure_gastos_schema(base)
@@ -880,7 +829,7 @@ elif menu == "Gerenciar":
         df_sel = df_view.copy()
         df_sel["DataStr"] = pd.to_datetime(df_sel["Data"], errors="coerce").dt.strftime("%d/%m/%Y")
         df_sel["Rotulo"] = df_sel.apply(
-            lambda r: f"{r['DataStr']} | {r['Tipo']} | {r['Categoria']} | {fmt_brl(r['Valor'])} | ID={r['ID']}",
+            lambda r: f"{r['DataStr']} | {r['Categoria']} | {fmt_brl(r['Valor'])} | {r['Quem']} | ID={r['ID']}",
             axis=1,
         )
         escolha = st.selectbox("Selecione", df_sel["Rotulo"].tolist())
@@ -894,15 +843,15 @@ elif menu == "Gerenciar":
             st.rerun()
 
 # -----------------------------
-# METAS
+# METAS (somente visual)
 # -----------------------------
 elif menu == "Metas":
+    set_metric_font("1.35rem", "0.85rem")
+
     st.subheader(f"Metas: {MES_NOME[mes_sel]}/{ano_sel}")
 
     df_periodo = filtro_periodo_gastos(df_gastos, ano_sel, mes_sel)
-    df_periodo_despesas = apenas_despesas(df_periodo)
-
-    fixas_total, fixas_lancadas, fixas_restantes, df_variaveis = separar_fixas(df_periodo_despesas, df_fixas)
+    fixas_total, fixas_lancadas, fixas_restantes, df_variaveis = separar_fixas(df_periodo, df_fixas)
 
     gasto_total = float(df_variaveis["Valor"].sum()) if not df_variaveis.empty else 0.0
     total_prev = gasto_total + fixas_restantes
@@ -916,12 +865,17 @@ elif menu == "Metas":
     c3.metric("Total previsto", fmt_brl(total_prev))
     c4.metric("% Meta Geral", fmt_pct(perc) if meta_geral > 0 else "—")
 
+    # Linha azul com valor/% no fim (Meta geral)
     if meta_geral > 0:
-        st.progress(min(total_prev / meta_geral, 1.0))
+        progress_line(
+            "Meta geral (projeção do mês)",
+            total_prev,
+            meta_geral,
+            right_text=f"{fmt_brl(total_prev)} | {fmt_pct(perc)}"
+        )
 
     st.divider()
     st.subheader("Metas por categoria (variáveis)")
-
     gasto_por_cat = df_variaveis.groupby("Categoria")["Valor"].sum().to_dict() if not df_variaveis.empty else {}
 
     metas_base = df_metas.copy()
@@ -934,28 +888,30 @@ elif menu == "Metas":
     metas_cat["Excedeu"] = (metas_cat["Gasto_Mes"] - metas_cat["Meta"]).clip(lower=0.0)
     metas_cat["Percentual_Usado"] = metas_cat.apply(lambda r: (r["Gasto_Mes"] / r["Meta"] * 100.0) if r["Meta"] > 0 else 0.0, axis=1)
 
+    # Barras (linha) com valor/% no fim (por meta da categoria)
+    metas_cat_ord = metas_cat.sort_values("Percentual_Usado", ascending=False).copy()
+    for _, r in metas_cat_ord.iterrows():
+        cat = str(r["Categoria"])
+        meta_v = float(r["Meta"])
+        gasto_v = float(r["Gasto_Mes"])
+        pct_v = float(r["Percentual_Usado"])
+        right = f"{fmt_brl(gasto_v)} / {fmt_brl(meta_v)} | {fmt_pct(pct_v)}"
+        progress_line(cat, gasto_v, meta_v if meta_v > 0 else 0.0, right_text=right)
+
+    # Mantém tabela como estava
     view = metas_cat[["Categoria", "Meta", "Gasto_Mes", "Falta", "Excedeu", "Percentual_Usado"]].copy()
     view["Meta"] = view["Meta"].map(fmt_brl)
     view["Gasto_Mes"] = view["Gasto_Mes"].map(fmt_brl)
     view["Falta"] = view["Falta"].map(fmt_brl)
     view["Excedeu"] = view["Excedeu"].map(fmt_brl)
     view["Percentual_Usado"] = view["Percentual_Usado"].map(fmt_pct)
-
     st.dataframe(view, use_container_width=True)
 
 # -----------------------------
-# RESERVA
+# RESERVA (sem editar cadastro aqui)
 # -----------------------------
 elif menu == "Reserva":
-    st.markdown(
-        """
-        <style>
-        div[data-testid="stMetricValue"] { font-size: 1.35rem !important; }
-        div[data-testid="stMetricLabel"] { font-size: 0.85rem !important; }
-        </style>
-        """,
-        unsafe_allow_html=True
-    )
+    set_metric_font("1.25rem", "0.85rem")
 
     st.subheader("Reserva (movimentações e acompanhamento)")
 
@@ -1009,13 +965,30 @@ elif menu == "Reserva":
     c3.metric("Falta", fmt_brl(falta_total))
     c4.metric("% atingido", fmt_pct(perc_total) if total_meta > 0 else "—")
 
+    # Linha azul com valor/% no fim (total reservas)
     if total_meta > 0:
-        st.progress(min(total_saldo / total_meta, 1.0))
+        progress_line(
+            "Progresso total das reservas",
+            total_saldo,
+            total_meta,
+            right_text=f"{fmt_brl(total_saldo)} / {fmt_brl(total_meta)} | {fmt_pct(perc_total)}"
+        )
 
     st.subheader("Detalhe por reserva")
     if rcalc.empty:
         st.info("Sem reservas ativas.")
     else:
+        # Barras (linha) com valor/% no fim (por reserva)
+        rcalc_ord = rcalc.sort_values("Percentual", ascending=False).copy()
+        for _, r in rcalc_ord.iterrows():
+            nome = str(r["Reserva"])
+            meta_v = float(r["Meta"])
+            saldo_v = float(r["Saldo"])
+            pct_v = float(r["Percentual"])
+            right = f"{fmt_brl(saldo_v)} / {fmt_brl(meta_v)} | {fmt_pct(pct_v)}"
+            progress_line(nome, saldo_v, meta_v if meta_v > 0 else 0.0, right_text=right)
+
+        # Mantém tabela como estava
         view = rcalc[["Reserva", "Meta", "Saldo", "Falta", "Percentual"]].copy()
         view["Meta"] = view["Meta"].map(fmt_brl)
         view["Saldo"] = view["Saldo"].map(fmt_brl)
@@ -1035,7 +1008,7 @@ elif menu == "Reserva":
         st.info("Sem movimentações ainda.")
 
 # -----------------------------
-# CONTAS FIXAS
+# CONTAS FIXAS (sem editar aqui)
 # -----------------------------
 elif menu == "Contas Fixas":
     st.subheader("Contas fixas (visual e geração do mês)")
@@ -1063,13 +1036,14 @@ elif menu == "Contas Fixas":
         st.rerun()
 
 # -----------------------------
-# CADASTROS
+# CADASTROS (ÚNICO lugar de edição)
 # -----------------------------
 elif menu == "Cadastros":
     st.subheader("Cadastros (metas, contas fixas e reservas)")
 
     tab1, tab2, tab3 = st.tabs(["Metas", "Contas Fixas", "Reservas"])
 
+    # -------- METAS
     with tab1:
         st.subheader("Metas")
         meta_geral_atual = get_meta_geral(df_metas)
@@ -1101,6 +1075,7 @@ elif menu == "Cadastros":
             st.cache_data.clear()
             st.rerun()
 
+    # -------- CONTAS FIXAS
     with tab2:
         st.subheader("Contas Fixas")
         st.caption("Aqui é o único lugar para criar/editar/apagar contas fixas. (ID fica oculto.)")
@@ -1145,6 +1120,45 @@ elif menu == "Cadastros":
             st.cache_data.clear()
             st.rerun()
 
+        st.divider()
+        st.subheader("Editar / apagar conta fixa")
+        if df_fixas.empty:
+            st.info("Cadastre uma conta fixa primeiro.")
+        else:
+            opcoes = df_fixas.copy()
+            opcoes["Rotulo"] = opcoes.apply(lambda r: f"{r['Descricao']} | {fmt_brl(r['Valor'])} | venc {r['Dia_Venc']} | {'Ativo' if r['Ativo'] else 'Inativo'}", axis=1)
+            escolha = st.selectbox("Selecione", opcoes["ID_Fixa"].tolist(), format_func=lambda x: opcoes.loc[opcoes["ID_Fixa"] == x, "Rotulo"].iloc[0])
+
+            row = df_fixas.loc[df_fixas["ID_Fixa"] == escolha].iloc[0].to_dict()
+
+            with st.form("edit_fixa"):
+                desc2 = st.text_input("Descrição", value=str(row["Descricao"]))
+                cat2 = st.selectbox("Categoria", cats_lanc + ["Outros"], index=(cats_lanc + ["Outros"]).index(row["Categoria"]) if row["Categoria"] in (cats_lanc + ["Outros"]) else 0)
+                val2 = st.number_input("Valor (R$)", min_value=0.0, step=1.0, value=float(row["Valor"]))
+                dia2 = st.number_input("Dia de vencimento", min_value=1, max_value=31, step=1, value=int(row["Dia_Venc"]))
+                pag2 = st.selectbox("Pagamento", PAGAMENTOS, index=PAGAMENTOS.index(row["Pagamento"]) if row["Pagamento"] in PAGAMENTOS else 0)
+                quem2 = st.selectbox("Quem", PESSOAS, index=PESSOAS.index(row["Quem"]) if row["Quem"] in PESSOAS else 0)
+                ativo2 = st.checkbox("Ativo", value=bool(row["Ativo"]))
+                obs2 = st.text_input("Obs", value=str(row["Obs"]))
+                salvar2 = st.form_submit_button("Salvar edição")
+            if salvar2:
+                df_fixas.loc[df_fixas["ID_Fixa"] == escolha, ["Descricao","Categoria","Valor","Dia_Venc","Pagamento","Quem","Ativo","Obs"]] = \
+                    [desc2.strip(), cat2.strip(), float(val2), int(dia2), pag2, quem2, bool(ativo2), obs2]
+                df_fixas, _ = _ensure_fixas_schema(df_fixas)
+                salvar_excel(df_gastos, df_metas, df_fixas, df_reservas, df_mov_res, ARQUIVO)
+                st.cache_data.clear()
+                st.rerun()
+
+            st.divider()
+            confirmar = st.checkbox("Confirmo apagar esta conta fixa", value=False, key="conf_del_fixa")
+            if st.button("Apagar conta fixa selecionada", disabled=not confirmar):
+                df_fixas = df_fixas.loc[df_fixas["ID_Fixa"] != escolha].copy()
+                df_fixas, _ = _ensure_fixas_schema(df_fixas)
+                salvar_excel(df_gastos, df_metas, df_fixas, df_reservas, df_mov_res, ARQUIVO)
+                st.cache_data.clear()
+                st.rerun()
+
+    # -------- RESERVAS
     with tab3:
         st.subheader("Reservas")
         st.caption("Aqui é o único lugar para criar/editar/apagar reservas. (ID fica oculto.)")
@@ -1181,6 +1195,44 @@ elif menu == "Cadastros":
             st.cache_data.clear()
             st.rerun()
 
+        st.divider()
+        st.subheader("Editar / apagar reserva")
+        if df_reservas.empty:
+            st.info("Cadastre uma reserva primeiro.")
+        else:
+            op = df_reservas.copy()
+            op["Rotulo"] = op.apply(lambda r: f"{r['Reserva']} | meta {fmt_brl(r['Meta'])} | {'Ativo' if r['Ativo'] else 'Inativo'}", axis=1)
+            escolha = st.selectbox("Selecione", op["ID_Reserva"].tolist(), format_func=lambda x: op.loc[op["ID_Reserva"] == x, "Rotulo"].iloc[0])
+
+            row = df_reservas.loc[df_reservas["ID_Reserva"] == escolha].iloc[0].to_dict()
+
+            with st.form("edit_reserva"):
+                nome2 = st.text_input("Nome", value=str(row["Reserva"]))
+                meta2 = st.number_input("Meta (R$)", min_value=0.0, step=100.0, value=float(row["Meta"]))
+                ativo2 = st.checkbox("Ativo", value=bool(row["Ativo"]))
+                obs2 = st.text_input("Obs", value=str(row["Obs"]))
+                salvar2 = st.form_submit_button("Salvar edição")
+            if salvar2:
+                df_reservas.loc[df_reservas["ID_Reserva"] == escolha, ["Reserva","Meta","Ativo","Obs"]] = \
+                    [nome2.strip(), float(meta2), bool(ativo2), obs2]
+                df_reservas, _ = _ensure_reservas_schema(df_reservas)
+                salvar_excel(df_gastos, df_metas, df_fixas, df_reservas, df_mov_res, ARQUIVO)
+                st.cache_data.clear()
+                st.rerun()
+
+            st.divider()
+            confirmar = st.checkbox("Confirmo apagar esta reserva", value=False, key="conf_del_res")
+            if st.button("Apagar reserva selecionada", disabled=not confirmar):
+                df_reservas = df_reservas.loc[df_reservas["ID_Reserva"] != escolha].copy()
+                df_mov_res = df_mov_res.loc[df_mov_res["ID_Reserva"] != str(escolha)].copy()
+
+                df_reservas, _ = _ensure_reservas_schema(df_reservas)
+                df_mov_res, _ = _ensure_movres_schema(df_mov_res)
+
+                salvar_excel(df_gastos, df_metas, df_fixas, df_reservas, df_mov_res, ARQUIVO)
+                st.cache_data.clear()
+                st.rerun()
+
 # -----------------------------
 # BACKUP / RESTORE
 # -----------------------------
@@ -1210,4 +1262,3 @@ else:
         df_gastos, df_metas, df_fixas, df_reservas, df_mov_res = restore_from_upload(up)
         st.success("Backup restaurado.")
         st.rerun()
-
