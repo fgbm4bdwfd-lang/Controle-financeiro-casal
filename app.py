@@ -14,6 +14,7 @@ from datetime import date
 st.set_page_config(page_title="Controle Financeiro", layout="centered")
 
 ARQUIVO = "dados.xlsx"
+LOCKFILE = f"{ARQUIVO}.lock"
 
 PAGAMENTOS = ["PIX", "Cartão Pão de Açucar", "Cartão Nubank", "Swile", "Pluxee"]
 PESSOAS = ["Roney", "Adriele"]
@@ -25,18 +26,58 @@ MESES = [
 ]
 MES_NOME = {n: nome for n, nome in MESES}
 
-# Colunas extras para suportar origem/conta fixa
+# Colunas
 GASTOS_COLS = ["ID", "Data", "Categoria", "Subcategoria", "Valor", "Pagamento", "Quem", "Obs", "Origem", "RefFixa"]
 METAS_COLS = ["Categoria", "Meta"]
 FIXAS_COLS = ["ID_Fixa", "Descricao", "Categoria", "Valor", "Dia_Venc", "Pagamento", "Quem", "Ativo", "Obs"]
 
+
 # -----------------------------
-# FUNÇÕES UTILITÁRIAS
+# LOCK (evita corrupção por escrita concorrente)
+# -----------------------------
+def acquire_lock(lock_path: str, stale_seconds: int = 180, timeout_seconds: int = 5) -> bool:
+    start = time.time()
+    while True:
+        try:
+            # se lock existir e for muito antigo, remove
+            if os.path.exists(lock_path):
+                try:
+                    age = time.time() - os.path.getmtime(lock_path)
+                    if age > stale_seconds:
+                        try:
+                            os.remove(lock_path)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            return True
+        except FileExistsError:
+            if time.time() - start > timeout_seconds:
+                return False
+            time.sleep(0.12)
+        except Exception:
+            return False
+
+
+def release_lock(lock_path: str):
+    try:
+        if os.path.exists(lock_path):
+            os.remove(lock_path)
+    except Exception:
+        pass
+
+
+# -----------------------------
+# FUNÇÕES DE SCHEMA
 # -----------------------------
 def _normalizar_colunas(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
     return df
+
 
 def _ensure_gastos_schema(df: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
     changed = False
@@ -61,6 +102,7 @@ def _ensure_gastos_schema(df: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
 
     return df[GASTOS_COLS].copy(), changed
 
+
 def _ensure_metas_schema(metas: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
     changed = False
     metas = _normalizar_colunas(metas)
@@ -79,6 +121,7 @@ def _ensure_metas_schema(metas: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
         changed = True
 
     return metas[METAS_COLS].copy(), changed
+
 
 def _ensure_fixas_schema(fixas: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
     changed = False
@@ -111,6 +154,7 @@ def _ensure_fixas_schema(fixas: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
 
     return fixas[FIXAS_COLS].copy(), changed
 
+
 def _default_frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     g = pd.DataFrame(columns=GASTOS_COLS)
     m = pd.DataFrame(
@@ -123,6 +167,10 @@ def _default_frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     f, _ = _ensure_fixas_schema(f)
     return g, m, f
 
+
+# -----------------------------
+# EXCEL: escrita atômica
+# -----------------------------
 def _write_bytes_atomic(path: str, data: bytes):
     tmp_path = f"{path}.tmp"
     bak_path = f"{path}.bak"
@@ -133,15 +181,16 @@ def _write_bytes_atomic(path: str, data: bytes):
         except Exception:
             pass
 
-    with open(tmp_path, "wb") as fh:
-        fh.write(data)
-        fh.flush()
+    with open(tmp_path, "wb") as f:
+        f.write(data)
+        f.flush()
         try:
-            os.fsync(fh.fileno())
+            os.fsync(f.fileno())
         except Exception:
             pass
 
     os.replace(tmp_path, path)
+
 
 def excel_bytes(g: pd.DataFrame, m: pd.DataFrame, f: pd.DataFrame) -> bytes:
     buffer = io.BytesIO()
@@ -151,18 +200,29 @@ def excel_bytes(g: pd.DataFrame, m: pd.DataFrame, f: pd.DataFrame) -> bytes:
         f.to_excel(writer, sheet_name="fixas", index=False)
     return buffer.getvalue()
 
+
 def salvar_excel(g: pd.DataFrame, m: pd.DataFrame, f: pd.DataFrame, arquivo: str = ARQUIVO):
-    g2, _ = _ensure_gastos_schema(g)
-    m2, _ = _ensure_metas_schema(m)
-    f2, _ = _ensure_fixas_schema(f)
-    data = excel_bytes(g2, m2, f2)
-    _write_bytes_atomic(arquivo, data)
+    ok = acquire_lock(LOCKFILE)
+    if not ok:
+        raise RuntimeError("Não foi possível obter lock para salvar. Tente novamente.")
+
+    try:
+        g2, _ = _ensure_gastos_schema(g)
+        m2, _ = _ensure_metas_schema(m)
+        f2, _ = _ensure_fixas_schema(f)
+
+        data = excel_bytes(g2, m2, f2)
+        _write_bytes_atomic(arquivo, data)
+    finally:
+        release_lock(LOCKFILE)
+
 
 def init_arquivo_se_faltar():
     if os.path.exists(ARQUIVO):
         return
     g, m, f = _default_frames()
     salvar_excel(g, m, f, ARQUIVO)
+
 
 @st.cache_data(show_spinner=False)
 def carregar_excel_cached(path: str, mtime: float):
@@ -178,6 +238,7 @@ def carregar_excel_cached(path: str, mtime: float):
     except Exception as e:
         return {"ok": False, "gastos": None, "metas": None, "fixas": None, "error": repr(e)}
 
+
 def _quarentena_arquivo(path: str) -> str:
     ts = time.strftime("%Y%m%d-%H%M%S")
     new_name = f"{path}.CORROMPIDO.{ts}"
@@ -190,6 +251,7 @@ def _quarentena_arquivo(path: str) -> str:
         except Exception:
             pass
     return new_name
+
 
 def carregar_excel():
     init_arquivo_se_faltar()
@@ -207,7 +269,7 @@ def carregar_excel():
         salvar_excel(g, m, f, ARQUIVO)
         st.cache_data.clear()
         st.session_state["RECOVERY_MSG"] = (
-            "O arquivo de dados estava corrompido no servidor e foi substituído por um novo. "
+            "O arquivo dados.xlsx no servidor estava corrompido e foi substituído por um novo. "
             f"O arquivo antigo foi movido para: {corrompido}. "
             "Vá em Backup/Restore e envie seu último backup para restaurar."
         )
@@ -220,9 +282,14 @@ def carregar_excel():
     if chg_g or chg_m or chg_f:
         salvar_excel(g, m, f, ARQUIVO)
         st.cache_data.clear()
+        return g, m, f
 
     return g, m, f
 
+
+# -----------------------------
+# HELPERS
+# -----------------------------
 def filtro_periodo_gastos(df: pd.DataFrame, ano: int, mes: int) -> pd.DataFrame:
     dfx = df.copy()
     dfx["Data_dt"] = pd.to_datetime(dfx["Data"], errors="coerce")
@@ -232,8 +299,10 @@ def filtro_periodo_gastos(df: pd.DataFrame, ano: int, mes: int) -> pd.DataFrame:
     out, _ = _ensure_gastos_schema(out)
     return out
 
+
 def ultimo_dia_mes(ano: int, mes: int) -> int:
     return calendar.monthrange(ano, mes)[1]
+
 
 def gerar_lancamentos_fixas(df_gastos: pd.DataFrame, df_fixas: pd.DataFrame, ano: int, mes: int) -> tuple[pd.DataFrame, int, int]:
     g = df_gastos.copy()
@@ -290,6 +359,7 @@ def gerar_lancamentos_fixas(df_gastos: pd.DataFrame, df_fixas: pd.DataFrame, ano
     g, _ = _ensure_gastos_schema(g)
     return g, criados, ignorados
 
+
 def restore_from_upload(uploaded_file) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     try:
         xls = pd.ExcelFile(uploaded_file)
@@ -309,16 +379,6 @@ def restore_from_upload(uploaded_file) -> tuple[pd.DataFrame, pd.DataFrame, pd.D
     st.cache_data.clear()
     return g, m, f
 
-def _agg_metas(metas_df: pd.DataFrame) -> pd.DataFrame:
-    """Normaliza e agrega metas por Categoria (caso haja duplicadas)."""
-    m, _ = _ensure_metas_schema(metas_df)
-    m["Categoria"] = m["Categoria"].astype(str).str.strip()
-    m = m[m["Categoria"] != ""].copy()
-    m["Meta"] = pd.to_numeric(m["Meta"], errors="coerce").fillna(0.0)
-    m = m.groupby("Categoria", as_index=False)["Meta"].sum()
-    if not (m["Categoria"].str.lower() == "geral").any():
-        m = pd.concat([m, pd.DataFrame([{"Categoria": "Geral", "Meta": 0}])], ignore_index=True)
-    return m
 
 # -----------------------------
 # APP
@@ -328,11 +388,13 @@ df_gastos, df_metas, df_fixas = carregar_excel()
 if "RECOVERY_MSG" in st.session_state:
     st.warning(st.session_state["RECOVERY_MSG"])
 
+# categorias
 cats = df_metas["Categoria"].dropna().astype(str).str.strip().tolist()
 cats_lanc = [c for c in cats if c.lower() != "geral" and c != ""]
 if not cats_lanc:
     cats_lanc = ["Alimentação", "Transporte", "Moradia", "Lazer", "Outros"]
 
+# anos disponíveis
 hoje = date.today()
 tmp = df_gastos.copy()
 tmp["Data_dt"] = pd.to_datetime(tmp["Data"], errors="coerce")
@@ -341,13 +403,19 @@ if hoje.year not in anos:
     anos = sorted(list(set(anos + [hoje.year])))
 
 with st.sidebar:
-    menu = st.radio("Menu", ["Lançar", "Resumo", "Gerenciar", "Metas", "Contas Fixas", "Backup/Restore"], index=0)
+    menu = st.radio(
+        "Menu",
+        ["Lançar", "Resumo", "Gerenciar", "Metas", "Contas Fixas", "Backup/Restore"],
+        index=0
+    )
+
     st.divider()
     st.subheader("Período")
     ano_sel = st.selectbox("Ano", anos, index=anos.index(hoje.year))
     mes_sel = st.selectbox("Mês", [m for m, _ in MESES], index=hoje.month - 1, format_func=lambda m: MES_NOME[m])
 
 st.title("Controle Financeiro do Casal")
+
 
 # -----------------------------
 # LANÇAR
@@ -379,7 +447,10 @@ if menu == "Lançar":
             "RefFixa": "",
         }
         df_gastos = pd.concat([df_gastos, pd.DataFrame([novo])], ignore_index=True)
-        salvar_excel(df_gastos, df_metas, df_fixas, ARQUIVO)
+        try:
+            salvar_excel(df_gastos, df_metas, df_fixas, ARQUIVO)
+        except Exception as e:
+            st.error(str(e))
         st.cache_data.clear()
         st.rerun()
 
@@ -392,6 +463,7 @@ if menu == "Lançar":
         use_container_width=True
     )
 
+
 # -----------------------------
 # RESUMO
 # -----------------------------
@@ -399,21 +471,21 @@ elif menu == "Resumo":
     st.subheader(f"Resumo: {MES_NOME[mes_sel]}/{ano_sel}")
 
     df_periodo = filtro_periodo_gastos(df_gastos, ano_sel, mes_sel)
-    total_lancado = float(df_periodo["Valor"].sum()) if not df_periodo.empty else 0.0
+    gasto_mes = float(df_periodo["Valor"].sum()) if not df_periodo.empty else 0.0
 
     fixas_ativas = df_fixas[df_fixas["Ativo"] == True].copy()
-    total_fixas_previsto = float(fixas_ativas["Valor"].sum()) if not fixas_ativas.empty else 0.0
-    total_previsto = total_lancado + total_fixas_previsto
+    fixas_prev = float(fixas_ativas["Valor"].sum()) if not fixas_ativas.empty else 0.0
+    total_prev = gasto_mes + fixas_prev
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("Gasto lançado no mês", f"R$ {total_lancado:,.2f}")
-    c2.metric("Contas fixas previstas", f"R$ {total_fixas_previsto:,.2f}")
-    c3.metric("Total previsto", f"R$ {total_previsto:,.2f}")
+    c1.metric("Gasto lançado no mês", f"R$ {gasto_mes:,.2f}")
+    c2.metric("Fixas previstas (ativas)", f"R$ {fixas_prev:,.2f}")
+    c3.metric("Total previsto (mês)", f"R$ {total_prev:,.2f}")
 
     st.divider()
-    st.subheader("Gastos por categoria (lançado no mês)")
+    st.subheader("Por categoria (lançado)")
     if df_periodo.empty:
-        st.write("Sem lançamentos neste período.")
+        st.info("Sem lançamentos no período.")
     else:
         resumo_cat = (
             df_periodo.groupby("Categoria")["Valor"]
@@ -421,7 +493,31 @@ elif menu == "Resumo":
             .sort_values(ascending=False)
             .reset_index()
         )
-        st.dataframe(resumo_cat, use_container_width=True)
+
+        total_cat = float(resumo_cat["Valor"].sum())
+        if total_cat > 0:
+            resumo_cat["Percentual"] = (resumo_cat["Valor"] / total_cat) * 100.0
+        else:
+            resumo_cat["Percentual"] = 0.0
+
+        resumo_cat_view = resumo_cat.copy()
+        resumo_cat_view["Percentual"] = resumo_cat_view["Percentual"].map(lambda x: f"{x:.2f}%")
+
+        st.dataframe(
+            resumo_cat_view[["Categoria", "Valor", "Percentual"]],
+            use_container_width=True
+        )
+
+    st.subheader("Por pessoa (lançado)")
+    if not df_periodo.empty:
+        resumo_pessoa = (
+            df_periodo.groupby("Quem")["Valor"]
+            .sum()
+            .sort_values(ascending=False)
+            .reset_index()
+        )
+        st.dataframe(resumo_pessoa, use_container_width=True)
+
 
 # -----------------------------
 # GERENCIAR
@@ -431,10 +527,10 @@ elif menu == "Gerenciar":
 
     df_periodo = filtro_periodo_gastos(df_gastos, ano_sel, mes_sel)
 
-    col1, col2 = st.columns([1, 1])
-    with col1:
+    c1, c2 = st.columns([1, 1])
+    with c1:
         editar_todos = st.checkbox("Editar todos (não só o período)", value=False)
-    with col2:
+    with c2:
         mostrar_colunas_tecnicas = st.checkbox("Mostrar colunas técnicas (Origem/RefFixa)", value=False)
 
     df_view = df_gastos.copy() if editar_todos else df_periodo.copy()
@@ -482,17 +578,44 @@ elif menu == "Gerenciar":
             except Exception as e:
                 st.error(f"Erro ao salvar alterações: {e}")
 
+        st.divider()
+        st.subheader("Excluir lançamento rápido")
+        df_sel = df_view.copy()
+        df_sel["DataStr"] = pd.to_datetime(df_sel["Data"], errors="coerce").dt.strftime("%d/%m/%Y")
+        df_sel["Rotulo"] = df_sel.apply(
+            lambda r: f"{r['DataStr']} | {r['Categoria']} | R$ {float(r['Valor']):,.2f} | {r['Quem']} | ID={r['ID']}",
+            axis=1,
+        )
+        escolha = st.selectbox("Selecione", df_sel["Rotulo"].tolist())
+        confirmar = st.checkbox("Confirmo a exclusão definitiva", value=False)
+
+        if st.button("Excluir selecionado") and confirmar:
+            try:
+                id_escolhido = escolha.split("ID=")[-1].strip()
+                df_gastos = df_gastos.loc[df_gastos["ID"].astype(str) != id_escolhido].copy()
+                salvar_excel(df_gastos, df_metas, df_fixas, ARQUIVO)
+                st.cache_data.clear()
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erro ao excluir: {e}")
+
+
 # -----------------------------
-# METAS (COM % / GASTO / FALTA)
+# METAS (com porcentagem, gasto e falta)
 # -----------------------------
 elif menu == "Metas":
     st.subheader("Metas")
 
-    st.write("Edite a tabela abaixo. A categoria 'Geral' é a meta total do mês.")
-    metas_edit = st.data_editor(df_metas, num_rows="dynamic", use_container_width=True, key="metas_editor")
+    st.write("Edite as metas abaixo. A categoria 'Geral' é a meta total do mês.")
+    metas_edit = st.data_editor(
+        df_metas,
+        num_rows="dynamic",
+        use_container_width=True,
+        key="metas_editor"
+    )
 
-    col_a, col_b = st.columns([1, 3])
-    with col_a:
+    col_save, col_info = st.columns([1, 3])
+    with col_save:
         if st.button("Salvar metas", type="primary"):
             try:
                 metas_edit, _ = _ensure_metas_schema(metas_edit)
@@ -502,66 +625,56 @@ elif menu == "Metas":
                 st.rerun()
             except Exception as e:
                 st.error(f"Erro ao salvar metas: {e}")
-    with col_b:
-        st.caption("O acompanhamento abaixo usa o mês/ano selecionado na barra lateral.")
+
+    with col_info:
+        st.caption("O acompanhamento abaixo considera o mês/ano selecionado na barra lateral.")
 
     st.divider()
     st.subheader(f"Acompanhamento: {MES_NOME[mes_sel]}/{ano_sel}")
 
-    # Base do mês
     df_periodo = filtro_periodo_gastos(df_gastos, ano_sel, mes_sel)
     gasto_total_mes = float(df_periodo["Valor"].sum()) if not df_periodo.empty else 0.0
 
     fixas_ativas = df_fixas[df_fixas["Ativo"] == True].copy()
     total_fixas_previsto = float(fixas_ativas["Valor"].sum()) if not fixas_ativas.empty else 0.0
-
-    # Previsto = lançado + fixas ativas (previstas)
     total_previsto = gasto_total_mes + total_fixas_previsto
+
+    metas_base = metas_edit.copy()
+    metas_base["Categoria"] = metas_base["Categoria"].astype(str).str.strip()
+    metas_base["Meta"] = pd.to_numeric(metas_base["Meta"], errors="coerce").fillna(0.0)
+
+    meta_geral_series = metas_base[metas_base["Categoria"].str.lower() == "geral"]["Meta"]
+    meta_geral = float(meta_geral_series.iloc[0]) if len(meta_geral_series) > 0 else 0.0
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Gasto lançado no mês", f"R$ {gasto_total_mes:,.2f}")
-    c2.metric("Fixas ativas (previstas)", f"R$ {total_fixas_previsto:,.2f}")
-    c3.metric("Total previsto", f"R$ {total_previsto:,.2f}")
+    c2.metric("Fixas previstas (ativas)", f"R$ {total_fixas_previsto:,.2f}")
+    c3.metric("Total previsto (mês)", f"R$ {total_previsto:,.2f}")
 
-    metas_agg = _agg_metas(metas_edit)
-
-    # Meta Geral
     st.divider()
-    st.subheader("Meta Geral")
-
-    meta_geral_series = metas_agg[metas_agg["Categoria"].str.lower() == "geral"]["Meta"]
-    meta_geral = float(meta_geral_series.iloc[0]) if len(meta_geral_series) > 0 else 0.0
+    st.subheader("Meta Geral (mês)")
 
     if meta_geral > 0:
         perc_geral = (total_previsto / meta_geral) * 100.0
         falta_geral = max(meta_geral - total_previsto, 0.0)
         excedeu_geral = max(total_previsto - meta_geral, 0.0)
 
+        st.write(f"Meta: R$ {meta_geral:,.2f}")
+        st.write(f"Usado: R$ {total_previsto:,.2f} | Falta: R$ {falta_geral:,.2f} | Excedeu: R$ {excedeu_geral:,.2f}")
         st.progress(min(total_previsto / meta_geral, 1.0))
-        st.write(
-            f"Meta: R$ {meta_geral:,.2f} | "
-            f"Usado (previsto): R$ {total_previsto:,.2f} | "
-            f"Falta: R$ {falta_geral:,.2f} | "
-            f"Excedeu: R$ {excedeu_geral:,.2f} | "
-            f"Percentual usado: {perc_geral:.2f}%"
-        )
+        st.write(f"Percentual usado: {perc_geral:.2f}%")
     else:
-        st.info("Defina a meta 'Geral' (> 0) para aparecer o percentual e o quanto falta.")
+        st.info("Defina a meta 'Geral' (> 0) para ver o percentual geral do mês.")
 
-    # Metas por categoria (apenas lançado no mês)
     st.divider()
-    st.subheader("Metas por categoria")
+    st.subheader("Metas por categoria (gasto lançado no mês)")
 
     if df_periodo.empty:
         gasto_por_cat = {}
     else:
         gasto_por_cat = df_periodo.groupby("Categoria")["Valor"].sum().to_dict()
 
-    metas_cat = metas_agg[metas_agg["Categoria"].str.lower() != "geral"].copy()
-
-    # Se quiser mostrar só categorias com meta > 0, descomente:
-    # metas_cat = metas_cat[metas_cat["Meta"] > 0].copy()
-
+    metas_cat = metas_base[metas_base["Categoria"].str.lower() != "geral"].copy()
     metas_cat["Gasto_Mes"] = metas_cat["Categoria"].map(lambda c: float(gasto_por_cat.get(str(c).strip(), 0.0)))
     metas_cat["Falta"] = (metas_cat["Meta"] - metas_cat["Gasto_Mes"]).clip(lower=0.0)
     metas_cat["Excedeu"] = (metas_cat["Gasto_Mes"] - metas_cat["Meta"]).clip(lower=0.0)
@@ -587,12 +700,12 @@ elif menu == "Metas":
         meta = float(r["Meta"])
         gasto = float(r["Gasto_Mes"])
         pct = float(r["Percentual_Usado"])
-
         if meta > 0:
-            st.write(f"{cat} | Usado: R$ {gasto:,.2f} / Meta: R$ {meta:,.2f} | {pct:.2f}% | Falta: R$ {max(meta-gasto, 0):,.2f}")
+            st.write(f"{cat} — R$ {gasto:,.2f} / R$ {meta:,.2f} ({pct:.2f}%)")
             st.progress(min(gasto / meta, 1.0))
         else:
-            st.write(f"{cat} | Meta = 0 (sem cálculo %) | Gasto no mês: R$ {gasto:,.2f}")
+            st.write(f"{cat} — Meta não definida (0). Gasto no mês: R$ {gasto:,.2f}")
+
 
 # -----------------------------
 # CONTAS FIXAS
@@ -624,7 +737,10 @@ elif menu == "Contas Fixas":
             "Obs": obs,
         }
         df_fixas = pd.concat([df_fixas, pd.DataFrame([novo])], ignore_index=True)
-        salvar_excel(df_gastos, df_metas, df_fixas, ARQUIVO)
+        try:
+            salvar_excel(df_gastos, df_metas, df_fixas, ARQUIVO)
+        except Exception as e:
+            st.error(str(e))
         st.cache_data.clear()
         st.rerun()
 
@@ -644,6 +760,8 @@ elif menu == "Contas Fixas":
 
     st.divider()
     st.subheader(f"Gerar lançamentos das contas fixas em {MES_NOME[mes_sel]}/{ano_sel}")
+    st.caption("Cria lançamentos em 'gastos' para as fixas ativas, sem duplicar no mês.")
+
     if st.button("Gerar lançamentos do mês", type="primary"):
         try:
             df_gastos_novo, criados, ignorados = gerar_lancamentos_fixas(df_gastos, df_fixas, ano_sel, mes_sel)
@@ -655,6 +773,7 @@ elif menu == "Contas Fixas":
         except Exception as e:
             st.error(f"Erro ao gerar lançamentos: {e}")
 
+
 # -----------------------------
 # BACKUP / RESTORE
 # -----------------------------
@@ -665,7 +784,10 @@ else:
         st.session_state["backup_bytes"] = None
 
     if st.button("Gerar backup Excel"):
-        st.session_state["backup_bytes"] = excel_bytes(df_gastos, df_metas, df_fixas)
+        try:
+            st.session_state["backup_bytes"] = excel_bytes(df_gastos, df_metas, df_fixas)
+        except Exception as e:
+            st.error(f"Erro ao gerar backup: {e}")
 
     if st.session_state["backup_bytes"]:
         st.download_button(
