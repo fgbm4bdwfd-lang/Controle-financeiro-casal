@@ -762,6 +762,10 @@ elif menu == "Resumo":
 
     st.subheader(f"Resumo: {MES_NOME[mes_sel]}/{ano_sel}")
     df_periodo = filtro_periodo_gastos(df_gastos, ano_sel, mes_sel)
+        # Remove pagamentos de fatura do cálculo (evita duplicidade)
+    df_periodo = df_periodo.loc[~df_periodo["Origem"].astype(str).str.upper().isin([x.upper() for x in ORIGENS_NAO_CONTABILIZAR])].copy()
+    df_periodo, _ = _ensure_gastos_schema(df_periodo)
+
 
     total_fixas_planejado, total_fixas_lancado, df_variaveis, df_fix_mes, f_ativas = marcar_e_separar_fixas(df_periodo, df_fixas)
 
@@ -1314,6 +1318,7 @@ else:
         df_gastos, df_metas, df_fixas, df_reservas, df_mov_res = restore_from_upload(up)
         st.success("Backup restaurado.")
         st.rerun()
+
 
 
 
