@@ -44,6 +44,17 @@ if salvar:
     df.to_excel(ARQUIVO, sheet_name="gastos", index=False)
     st.success("✅ Gasto salvo com sucesso!")
 
+    df = pd.read_excel(ARQUIVO, sheet_name="gastos")
+
+# garante Data como data para ordenar corretamente
+if "Data" in df.columns:
+    df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
+
+st.subheader("Últimos lançamentos")
+st.dataframe(
+    df.sort_values("Data", ascending=False).head(50),
+    use_container_width=True
+
 # relatório do mês
 df["Data"] = pd.to_datetime(df["Data"])
 mes_atual = df[df["Data"].dt.month == date.today().month]
@@ -53,3 +64,4 @@ total_mes = mes_atual["Valor"].sum()
 st.divider()
 st.subheader("📊 Resumo do Mês")
 st.metric("Total Gasto no Mês", f"R$ {total_mes:,.2f}")
+
