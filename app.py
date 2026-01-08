@@ -1,3 +1,4 @@
+import html as _html    
 import os
 import io
 import uuid
@@ -1209,3 +1210,4 @@ else:
         df_gastos, df_metas, df_fixas, df_reservas, df_mov_res = restore_from_upload(up)
         st.success("Backup restaurado.")
         st.rerun()
+
